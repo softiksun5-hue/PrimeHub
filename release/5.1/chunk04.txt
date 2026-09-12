@@ -1,0 +1,66 @@
+    local queueTarget = math.max(50, tonumber(env.HopQueueTarget) or 200)
+    local refillThreshold = math.max(5, tonumber(env.HopQueueRefillThreshold) or 20)
+    local maxPages = math.max(2, tonumber(env.HopQueueMaxPages) or 10)
+    maxCandidates = math.max(1, tonumber(maxCandidates) or tonumber(env.HopAttemptLimit) or 6)
+
+    local function normalizeQueueEntry(server)
+        if type(server) ~= "table" then return nil end
+        local id = tostring(server.id or "")
+        local playing = tonumber(server.playing) or 0
+        local capacity = tonumber(server.maxPlayers) or 0
+        local freeSlots = math.max(0, capacity - playing)
+        if #id < 5 or id == currentJobId or visited[id] or capacity <= playing
+            or freeSlots < minFreeSlots or playing < minPlayers or playing > maxPlayersWanted then
+            return nil
+        end
+        local tier = playing >= 8 and "high" or (playing >= 5 and "mid" or "low")
+        return {
+            id=id, playing=playing, maxPlayers=capacity,
+            _primeHubFreeSlots=freeSlots, _primeHubTier=tier,
+        }
+    end
+
+    local high, mid, low, seen = {}, {}, {}, {}
+    local function addServer(raw)
+        local server = normalizeQueueEntry(raw)
+        if not server or seen[server.id] then return false end
+        seen[server.id] = true
+        if server._primeHubTier == "high" then high[#high+1] = server
+        elseif server._primeHubTier == "mid" then mid[#mid+1] = server
+        else low[#low+1] = server end
+        return true
+    end
+
+    for _, raw in ipairs(state.serverQueue) do addServer(raw) end
+
+    local pagesDesc, pagesAsc, rowsDesc, rowsAsc = 0, 0, 0, 0
+    local added = 0
+    local function fetchOrder(sortOrder)
+        local cursor = ""
+        local dirPages = 0
+        while dirPages < maxPages do
+            local suffix = ""
+            if cursor ~= "" then
+                local encoded = cursor
+                pcall(function() encoded = HttpService:UrlEncode(cursor) end)
+                suffix = "&cursor=" .. encoded
+            end
+            local url = string.format(
+                "https://games.roblox.com/v1/games/%s/servers/Public?sortOrder=%s&excludeFullGames=true&limit=100%s",
+                tostring(game.PlaceId), tostring(sortOrder), suffix
+            )
+            local body = httpGetBody(url)
+            if not body then
+                hopDebug("queue refill HTTP failed order=" .. tostring(sortOrder) .. " page=" .. tostring(dirPages + 1))
+                break
+            end
+            local ok, decoded = pcall(function() return HttpService:JSONDecode(body) end)
+            if not ok or type(decoded) ~= "table" then
+                hopDebug("queue refill JSON failed order=" .. tostring(sortOrder) .. " page=" .. tostring(dirPages + 1))
+                break
+            end
+            dirPages = dirPages + 1
+            local data = decoded.data or {}
+            if sortOrder == "Desc" then pagesDesc=pagesDesc+1; rowsDesc=rowsDesc+#data
+            else pagesAsc=pagesAsc+1; rowsAsc=rowsAsc+#data end
+            for _, raw in ipairs(data) do if addServer(raw) then added = added + 1 end end
