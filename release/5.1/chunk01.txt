@@ -1,0 +1,55 @@
+-- PrimeHub 5.1 protected patch release
+-- Applies the 5.1 delta in memory over the existing encrypted 5.0 production core.
+local env=(type(getgenv)=="function" and getgenv()) or _G
+local RELEASE_URL="https://raw.githubusercontent.com/softiksun5-hue/PrimeHub/main/release/PrimeHub-5.1.lua"
+local OLD_URL="https://raw.githubusercontent.com/softiksun5-hue/PrimeHub/main/release/PrimeHub-5.0.lua"
+local OLD_LOCAL="PrimeHub_5_0_PROTECTED.lua"
+local SELF_FILE="PrimeHub_5_1_PATCHED.lua"
+
+-- Save this versioned patcher locally so server hops do not need GitHub again.
+local selfSource=env.PrimeHub51PatchSource
+if (type(selfSource)~="string" or #selfSource<100) and type(game.HttpGet)=="function" then
+    local ok,data=pcall(function() return game:HttpGet(RELEASE_URL,true) end)
+    if ok and type(data)=="string" and #data>100 then selfSource=data end
+end
+if type(selfSource)=="string" and #selfSource>100 and type(writefile)=="function" then
+    pcall(writefile,SELF_FILE,selfSource)
+end
+env.PrimeHub51PatchSource=nil
+
+-- Filter explicitly OFF. Held fruits are still excluded, but world fruits are never
+-- rejected just because DroppedBy/DroppedByUserId exists.
+env.OnlyServerSpawnedFruits=false
+env.BotServerScreening=true
+env.BotServerCooldown=14400
+
+local NEW_CFG=[====[-- PrimeHub 5.1 server-hop tuning. Mixed discovery samples both ends of the
+-- Roblox public-server list, then interleaves populated and medium servers.
+env.HopMinFreeSlots = tonumber(env.HopMinFreeSlots) or 1
+env.HopAttemptLimit = tonumber(env.HopAttemptLimit) or 6
+env.HopRetryDelay = tonumber(env.HopRetryDelay) or 0.75
+env.HopFailureWindow = tonumber(env.HopFailureWindow) or 3
+env.InitialHopAfterScan = env.InitialHopAfterScan ~= false
+env.SuppressTeleportErrorPrompt = false
+env.PrimeHubDebug = env.PrimeHubDebug ~= false
+env.HopPreferNativeBrowser = env.HopPreferNativeBrowser ~= false
+
+env.AutoHopInterval = tonumber(env.AutoHopInterval) or 15
+env.PostFruitHopDelay = tonumber(env.PostFruitHopDelay) or 3
+env.HopVisitedCooldown = tonumber(env.HopVisitedCooldown) or 2400
+if env.HopVisitedCooldown == 3600 then env.HopVisitedCooldown = 2400 end
+env.HopNoCandidateDelay = tonumber(env.HopNoCandidateDelay) or 2
+env.HopQueueTarget = math.max(50, tonumber(env.HopQueueTarget) or 200)
+env.HopQueueRefillThreshold = math.max(5, tonumber(env.HopQueueRefillThreshold) or 20)
+env.HopQueueMaxPages = math.max(2, tonumber(env.HopQueueMaxPages) or 10)
+
+-- 2-10 remain eligible. 8-10 are deliberately retained, but they are no longer
+-- consumed as one giant Desc-only block. 5-7 are mixed with them; 2-4 are fallback.
+env.HopQueueMinPlayers = math.max(2, tonumber(env.HopQueueMinPlayers) or 2)
+env.HopQueueMaxPlayers = math.max(env.HopQueueMinPlayers, tonumber(env.HopQueueMaxPlayers) or 10)
+env.HopPreferredMinPlayers = math.max(env.HopQueueMinPlayers, tonumber(env.HopPreferredMinPlayers) or 5)
+env.HopPreferredMaxPlayers = math.min(env.HopQueueMaxPlayers, math.max(env.HopPreferredMinPlayers, tonumber(env.HopPreferredMaxPlayers) or 10))
+env.HopPreferredPlayers = tonumber(env.HopPreferredPlayers) or 9
+env.HopMinPlayers = env.HopQueueMinPlayers
+env.HopMaxPlayers = env.HopQueueMaxPlayers
+
