@@ -1,0 +1,49 @@
+                AddLog("Current server " .. currentJobId .. " added to recent cooldown.", Color3.fromRGB(100, 200, 255))
+            end
+            currentServerRemembered = true
+        end]====]
+local OLD_SCAN=[====[executorLog("SCAN",string.format("scanner mode=%s allFruits=%s serverOnly=%s | persistent queue=%d cooldown=%ss",env.ScanDescendants and "descendants" or "top-level",tostring(env.SniperAllFruits),tostring(env.OnlyServerSpawnedFruits),tonumber(env.HopQueueTarget) or 200,tostring(env.HopVisitedCooldown)))]====]
+local NEW_SCAN=[====[executorLog("SCAN",string.format("scanner mode=%s allFruits=%s dropFilter=OFF | strategy=mixed-v51 queue=%d cooldown=%ss",env.ScanDescendants and "descendants" or "top-level",tostring(env.SniperAllFruits),tonumber(env.HopQueueTarget) or 200,tostring(env.HopVisitedCooldown)))]====]
+
+local function replaceRange(src, firstAnchor, secondAnchor, replacement)
+    local a=string.find(src,firstAnchor,1,true)
+    if not a then error("[PrimeHub 5.1] patch anchor missing: "..tostring(firstAnchor)) end
+    local b=string.find(src,secondAnchor,a,true)
+    if not b then error("[PrimeHub 5.1] patch end anchor missing: "..tostring(secondAnchor)) end
+    return string.sub(src,1,a-1)..replacement..string.sub(src,b)
+end
+local function replaceLiteral(src, oldText, newText, required)
+    local a,b=string.find(src,oldText,1,true)
+    if not a then
+        if required then error("[PrimeHub 5.1] literal patch target missing") end
+        return src,false
+    end
+    return string.sub(src,1,a-1)..newText..string.sub(src,b+1),true
+end
+
+local function patchPlain(src)
+    -- Visible release is 5.1. PRIMEHUB_VERSION/buildId remain internally 5.0 so the
+    -- already deployed license database accepts the same keys without migration.
+    src=string.gsub(src,"PrimeHub 5%.0","PrimeHub 5.1")
+    src=string.gsub(src,"BLOX FRUITS  •  5%.0","BLOX FRUITS  •  5.1")
+    src=string.gsub(src,"Starting v5%.0","Starting v5.1")
+    src=string.gsub(src,'"Build: primehub%-5%.0"','"Build: PrimeHub 5.1"')
+    src=string.gsub(src,'primeHubVersion = PRIMEHUB_VERSION','primeHubVersion = "5.1"')
+
+    src=replaceRange(src,"-- Stage 11 server-hop tuning.","local TargetFruits = {",NEW_CFG)
+    src=replaceRange(src,"local function pruneVisitTimestamps(state)","local function findUnvisitedServer()",NEW_HOP)
+    src=string.gsub(src,"elseif placeId == 4442272183 or placeId == 79091703265657 then",
+        "elseif placeId == 4442272183 or placeId == 79091703265657 or placeId == 85211729168715 then",1)
+
+    -- Remove the old player-drop rejection from isDroppedFruit.
+    src=string.gsub(src,"    if env%.OnlyServerSpawnedFruits and isPlayerDroppedFruit%(tool%) then return false end\n","",1)
+    src=select(1,replaceLiteral(src,OLD_REMEMBER,NEW_REMEMBER,true))
+    src=select(1,replaceLiteral(src,OLD_SCAN,NEW_SCAN,false))
+
+    -- Queue-on-teleport loads this local 5.1 patcher, not the unpatched old core.
+    src=string.gsub(src,"PrimeHub_5_0_SOURCE%.lua",SELF_FILE)
+    src=string.gsub(src,"PrimeHub_5_0_PROTECTED%.lua",SELF_FILE)
+    return src
+end
+
+local originalLoadstring=loadstring
