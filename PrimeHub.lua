@@ -1,11 +1,11 @@
--- PrimeHub 5.8 public loader
-local BASE = "https://raw.githubusercontent.com/softiksun5-hue/PrimeHub/main/release/PrimeHub-5.8.lua"
+-- PrimeHub 5.9 public loader
+local BASE = "https://raw.githubusercontent.com/softiksun5-hue/PrimeHub/main/release/PrimeHub-5.9.lua"
 local nonce = tostring(os.time()) .. "-" .. tostring(math.random(100000,999999))
 local URL = BASE .. "?cb=" .. nonce
 local ok, body = pcall(function() return game:HttpGet(URL, false) end)
 if not ok or type(body) ~= "string" or #body < 100 then
-    error("[PrimeHub 5.8] Could not download the fresh protected release: " .. tostring(body))
+    error("[PrimeHub 5.9] Could not download the fresh protected release: " .. tostring(body))
 end
 local fn, err = loadstring(body)
-if not fn then error("[PrimeHub 5.8] Release compile failed: " .. tostring(err)) end
+if not fn then error("[PrimeHub 5.9] Release compile failed: " .. tostring(err)) end
 return fn()
