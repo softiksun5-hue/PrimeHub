@@ -1,0 +1,67 @@
+-- Conservative autoreg-farm detector. It never skips a fruit that is already visible;
+-- it only gives an obviously bot-heavy JobId a longer revisit cooldown after scanning.
+env.BotServerScreening = env.BotServerScreening ~= false
+env.BotServerCooldown = math.max(tonumber(env.HopVisitedCooldown) or 2400, tonumber(env.BotServerCooldown) or 14400)
+
+-- PrimeHub 5.1 scanner: NO player-drop/server-only filter. Every world fruit-like Tool
+-- is eligible as long as it is not currently held inside a player character.
+env.ScanDescendants = env.ScanDescendants ~= false
+env.ScanDebug = env.ScanDebug ~= false
+env.ScanDebugNamesLimit = math.max(1, tonumber(env.ScanDebugNamesLimit) or 12)
+env.OnlyServerSpawnedFruits = false
+if env.SniperAllFruits == nil then env.SniperAllFruits = true end
+
+-- Automatically join a team only when a target fruit is present.
+env.AutoTeam = env.AutoTeam ~= false
+env.PreferredTeam = (env.PreferredTeam == "Marines" and "Marines") or "Pirates"
+env.TeamReadyTimeout = tonumber(env.TeamReadyTimeout) or 10
+env.TeamRetryDelay = tonumber(env.TeamRetryDelay) or 0.75
+
+]====]
+local NEW_HOP=[====[local HOP_QUEUE_STRATEGY = "mixed-v51"
+
+local function pruneVisitTimestamps(state)
+    state.serverVisits = type(state.serverVisits) == "table" and state.serverVisits or {}
+    state.serverBlockedUntil = type(state.serverBlockedUntil) == "table" and state.serverBlockedUntil or {}
+    local now = os.time()
+    local cooldown = math.max(30, tonumber(env.HopVisitedCooldown) or 600)
+    local botCooldown = math.max(cooldown, tonumber(env.BotServerCooldown) or cooldown)
+    local keepFor = math.max(cooldown * 2, botCooldown * 2)
+    for id, ts in pairs(state.serverVisits) do
+        ts = tonumber(ts) or 0
+        if ts <= 0 or (now - ts) > keepFor then
+            state.serverVisits[id] = nil
+        end
+    end
+    for id, untilTs in pairs(state.serverBlockedUntil) do
+        untilTs = tonumber(untilTs) or 0
+        if untilTs <= now then state.serverBlockedUntil[id] = nil end
+    end
+end
+
+local function assessCurrentServerPopulation()
+    local info = {total=0, fresh7=0, fresh30=0, old180=0, botHeavy=false}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            info.total = info.total + 1
+            local age = tonumber(player.AccountAge) or -1
+            if age >= 0 and age <= 7 then info.fresh7 = info.fresh7 + 1 end
+            if age >= 0 and age <= 30 then info.fresh30 = info.fresh30 + 1 end
+            if age >= 180 then info.old180 = info.old180 + 1 end
+        end
+    end
+    local suspiciousNeeded = math.max(3, math.ceil(info.total * 0.60))
+    info.botHeavy = env.BotServerScreening == true
+        and getCurrentSea() ~= "Sea 1"
+        and info.total >= 4
+        and info.fresh30 >= suspiciousNeeded
+        and info.fresh7 >= 2
+    hopDebug(string.format(
+        "population total=%d fresh7=%d fresh30=%d old180=%d botHeavy=%s",
+        info.total, info.fresh7, info.fresh30, info.old180, tostring(info.botHeavy)
+    ))
+    return info
+end
+
+local function rememberVisitedServer(serverId, customCooldown)
+    if serverId == nil or tostring(serverId) == "" then return false end
