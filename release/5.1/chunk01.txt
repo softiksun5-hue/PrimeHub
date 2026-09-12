@@ -8,10 +8,8 @@ local SELF_FILE="PrimeHub_5_1_PATCHED.lua"
 
 -- Save this versioned patcher locally so server hops do not need GitHub again.
 local selfSource=env.PrimeHub51PatchSource
-if (type(selfSource)~="string" or #selfSource<100) and type(game.HttpGet)=="function" then
-    local ok,data=pcall(function() return game:HttpGet(RELEASE_URL,true) end)
-    if ok and type(data)=="string" and #data>100 then selfSource=data end
-end
+-- Fresh bootstrap passes the assembled patcher here once. During server hops the
+-- already-saved patcher must remain untouched and must not fetch GitHub again.
 if type(selfSource)=="string" and #selfSource>100 and type(writefile)=="function" then
     pcall(writefile,SELF_FILE,selfSource)
 end
