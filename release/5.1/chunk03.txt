@@ -1,0 +1,75 @@
+    serverId = tostring(serverId)
+
+    local state = loadRuntimeState()
+    pruneVisitTimestamps(state)
+
+    local now = os.time()
+    local normalCooldown = math.max(30, tonumber(env.HopVisitedCooldown) or 600)
+    local effectiveCooldown = math.max(normalCooldown, tonumber(customCooldown) or normalCooldown)
+    state.serverVisits[serverId] = now
+    state.serverBlockedUntil = type(state.serverBlockedUntil) == "table" and state.serverBlockedUntil or {}
+    if effectiveCooldown > normalCooldown then
+        state.serverBlockedUntil[serverId] = now + effectiveCooldown
+    end
+
+    local exists = false
+    for _, knownId in ipairs(state.servers) do
+        if tostring(knownId) == serverId then exists = true break end
+    end
+    if not exists then table.insert(state.servers, serverId) end
+    while #state.servers > 500 do table.remove(state.servers, 1) end
+
+    state.hops = hopCount
+    state.fruits = fruitCount
+    state.speed = tonumber(env.TweenSpeed) or 230
+    saveRuntimeState(state)
+    print(string.format("[HOP] Server %s cooldown until +%ss.", serverId, tostring(math.floor(effectiveCooldown))))
+    return true
+end
+
+local function makeVisitedSet(state)
+    local visited = {}
+    state.serverVisits = type(state.serverVisits) == "table" and state.serverVisits or {}
+    state.serverBlockedUntil = type(state.serverBlockedUntil) == "table" and state.serverBlockedUntil or {}
+    local now = os.time()
+    local cooldown = math.max(30, tonumber(env.HopVisitedCooldown) or 600)
+    for id, ts in pairs(state.serverVisits) do
+        ts = tonumber(ts) or 0
+        if ts > 0 and (now - ts) < cooldown then visited[tostring(id)] = true end
+    end
+    for id, untilTs in pairs(state.serverBlockedUntil) do
+        if (tonumber(untilTs) or 0) > now then visited[tostring(id)] = true end
+    end
+    return visited
+end
+
+local function shuffleServers(list)
+    local rng = Random.new()
+    for i = #list, 2, -1 do
+        local j = rng:NextInteger(1, i)
+        list[i], list[j] = list[j], list[i]
+    end
+    return list
+end
+
+local function collectUnvisitedServers(maxCandidates)
+    local state = loadRuntimeState()
+    pruneVisitTimestamps(state)
+    state.serverQueue = type(state.serverQueue) == "table" and state.serverQueue or {}
+    state.serverQueueBuiltAt = tonumber(state.serverQueueBuiltAt) or 0
+    state.serverQueueStrategy = tostring(state.serverQueueStrategy or "")
+
+    -- 5.0 queues were Desc-biased. Drop them exactly once on the 5.1 strategy upgrade.
+    if state.serverQueueStrategy ~= HOP_QUEUE_STRATEGY then
+        state.serverQueue = {}
+        state.serverQueueBuiltAt = 0
+        state.serverQueueStrategy = HOP_QUEUE_STRATEGY
+        saveRuntimeStateImmediate(state)
+        hopDebug("queue strategy changed -> mixed-v51; legacy queue cleared")
+    end
+
+    local visited = makeVisitedSet(state)
+    local currentJobId = tostring(game.JobId or "")
+    local minFreeSlots = math.max(1, tonumber(env.HopMinFreeSlots) or 1)
+    local minPlayers = math.max(2, tonumber(env.HopQueueMinPlayers) or 2)
+    local maxPlayersWanted = math.max(minPlayers, tonumber(env.HopQueueMaxPlayers) or 10)
