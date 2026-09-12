@@ -4,6 +4,7 @@
 local env=(type(getgenv)=="function" and getgenv()) or _G
 local BASE_URL="https://raw.githubusercontent.com/softiksun5-hue/PrimeHub/main/release/PrimeHub-6.2.lua"
 local SELF_FILE="PrimeHub_6_5_RELEASE.lua"
+local INNER_FILE="PrimeHub_6_5_PATCHED.lua"
 
 -- PrimeHub.lua passes the exact downloaded public payload here. Save it so teleport reloads
 -- this outer 6.5 bootstrap, rather than an older nested patcher that lacks WORLD_DROP support.
@@ -295,15 +296,31 @@ local function hookedLoadstring(code,chunkname)
 end
 
 loadstring=hookedLoadstring
-local okBody,body=pcall(function() return game:HttpGet(freshUrl(BASE_URL),false) end)
-if not okBody or type(body)~="string" or #body<100 then
-    loadstring=originalLoadstring
-    error("[PrimeHub 6.5] Could not download fresh 6.2 base: "..tostring(body))
+
+-- On a PrimeHub-initiated server hop, prefer the already-saved inner 6.5 patcher.
+-- The outer hook remains active, so WORLD_DROP support is reapplied to its final runtime.
+local resume=env.PrimeHubTeleportResume==true
+local body=nil
+local bodyIsInner=false
+if resume and type(isfile)=="function" and type(readfile)=="function" and isfile(INNER_FILE) then
+    local okRead,data=pcall(readfile,INNER_FILE)
+    if okRead and type(data)=="string" and #data>100 then
+        body=data
+        bodyIsInner=true
+    end
 end
 
--- Let the proven 6.2 generator do licensing, Sea queue scoping and teleport state,
--- but promote all of its current-version references to 6.5.
-body=string.gsub(body,"6%.2","6.5")
+if not body then
+    local okBody,data=pcall(function() return game:HttpGet(freshUrl(BASE_URL),false) end)
+    if not okBody or type(data)~="string" or #data<100 then
+        loadstring=originalLoadstring
+        error("[PrimeHub 6.5] Could not download fresh 6.2 base: "..tostring(data))
+    end
+    -- Let the proven 6.2 generator do licensing, Sea queue scoping and teleport state,
+    -- but promote all of its current-version references to 6.5.
+    body=string.gsub(data,"6%.2","6.5")
+end
+
 local fn,err=originalLoadstring(body)
 if not fn then
     loadstring=originalLoadstring
