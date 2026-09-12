@@ -1,0 +1,68 @@
+            cursor = tostring(decoded.nextPageCursor or "")
+            if cursor == "" or cursor == "nil" then break end
+        end
+    end
+
+    if (#high + #mid + #low) < refillThreshold or (#high + #mid + #low) < maxCandidates then
+        -- Sample both extremes. Dedupe makes overlap harmless when the server pool is small.
+        fetchOrder("Desc")
+        fetchOrder("Asc")
+        if added > 0 then
+            shuffleServers(high); shuffleServers(mid); shuffleServers(low)
+            state.serverQueueBuiltAt = os.time()
+        end
+    end
+
+    -- Interleave 8-10 with 5-7. 2-4 only fill the remaining tail.
+    local queue, hi, mi = {}, 1, 1
+    while #queue < queueTarget and (hi <= #high or mi <= #mid) do
+        if hi <= #high then queue[#queue+1]=high[hi]; hi=hi+1 end
+        if #queue < queueTarget and mi <= #mid then queue[#queue+1]=mid[mi]; mi=mi+1 end
+    end
+    local li = 1
+    while #queue < queueTarget and li <= #low do queue[#queue+1]=low[li]; li=li+1 end
+
+    state.serverQueue = queue
+    state.serverQueueStrategy = HOP_QUEUE_STRATEGY
+    saveRuntimeStateImmediate(state)
+
+    local result = {}
+    for _, server in ipairs(queue) do
+        if #result >= maxCandidates then break end
+        result[#result+1] = server
+    end
+
+    local selectedHigh, selectedMid, selectedLow = 0, 0, 0
+    for _, server in ipairs(result) do
+        if server._primeHubTier == "high" then selectedHigh=selectedHigh+1
+        elseif server._primeHubTier == "mid" then selectedMid=selectedMid+1
+        else selectedLow=selectedLow+1 end
+    end
+    hopDebug(string.format(
+        "strategy=mixed-v51 queue=%d high=%d mid=%d low=%d selected=%d selectedH/M/L=%d/%d/%d pagesDesc=%d pagesAsc=%d rowsDesc=%d rowsAsc=%d added=%d cooldown=%ss",
+        #queue, #high, #mid, #low, #result, selectedHigh, selectedMid, selectedLow,
+        pagesDesc, pagesAsc, rowsDesc, rowsAsc, added, tostring(env.HopVisitedCooldown)
+    ))
+    return result
+end
+
+]====]
+local OLD_REMEMBER=[====[        local currentJobId = tostring(game.JobId or "")
+        if currentJobId ~= "" and not currentServerRemembered then
+            if rememberVisitedServer(currentJobId) then
+                AddLog("Current server " .. currentJobId .. " added to recent cooldown.", Color3.fromRGB(100, 200, 255))
+            end
+            currentServerRemembered = true
+        end]====]
+local NEW_REMEMBER=[====[        local currentJobId = tostring(game.JobId or "")
+        if currentJobId ~= "" and not currentServerRemembered then
+            local population = assessCurrentServerPopulation()
+            local customCooldown = nil
+            if population.botHeavy then
+                customCooldown = tonumber(env.BotServerCooldown) or 14400
+                AddLog(string.format(
+                    "Bot-heavy server detected (%d/%d accounts <=30d). Extended revisit cooldown: %ds",
+                    population.fresh30, population.total, customCooldown
+                ), Color3.fromRGB(255, 180, 80))
+            end
+            if rememberVisitedServer(currentJobId, customCooldown) then
