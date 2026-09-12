@@ -1,0 +1,36 @@
+if type(originalLoadstring)~="function" then error("[PrimeHub 5.1] loadstring unavailable") end
+local patched=false
+local function hookedLoadstring(code,chunkname)
+    if type(code)=="string" then
+        if string.find(code,"PrimeHub 5.0 protected runtime",1,true) then
+            code=string.gsub(code,"PrimeHub_5_0_PROTECTED%.lua",SELF_FILE)
+        elseif string.find(code,"PrimeHub 5.0 | Fruit Sniper",1,true) then
+            code=patchPlain(code)
+            patched=true
+        end
+    end
+    return originalLoadstring(code,chunkname)
+end
+
+loadstring=hookedLoadstring
+local resume=env.PrimeHubTeleportResume==true
+local body=nil
+if resume and type(isfile)=="function" and type(readfile)=="function" and isfile(OLD_LOCAL) then
+    local ok,data=pcall(readfile,OLD_LOCAL)
+    if ok and type(data)=="string" and #data>100 then body=data end
+end
+if not body then
+    local ok,data=pcall(function() return game:HttpGet(OLD_URL,true) end)
+    if not ok or type(data)~="string" or #data<100 then
+        loadstring=originalLoadstring
+        error("[PrimeHub 5.1] Could not download base protected core: "..tostring(data))
+    end
+    body=data
+end
+local fn,compileErr=originalLoadstring(body)
+if not fn then loadstring=originalLoadstring; error("[PrimeHub 5.1] Base protected core compile failed: "..tostring(compileErr)) end
+local ok,result=pcall(fn)
+loadstring=originalLoadstring
+if not ok then error("[PrimeHub 5.1] Runtime failed: "..tostring(result)) end
+if not patched then error("[PrimeHub 5.1] Runtime patch was not applied") end
+return result
