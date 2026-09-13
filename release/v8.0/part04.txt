@@ -1,0 +1,353 @@
+ed(rawServer)
+                                if addServer(rawServer) then
+                                    added = added + 1
+                                end
+                            end
+                        end
+                    end
+                    if pageRows > 0 then
+                        state.nativeBrowserGoodPage = tonumber(item.page)
+                        state.nativeBrowserRetryAfter = 0
+                    end
+                    if env.PrimeHubDebugNativePages == true then
+                        hopDebug(string.format(
+                            "native browser page=%d rows=%d preferredNow=%d fallbackNow=%d crowdedNow=%d",
+                            tonumber(item.page) or -1, pageRows, #high, #mid, #low
+                        ))
+                    end
+                else
+                    nativeErrors = nativeErrors + 1
+                end
+            end
+
+            -- Timed-out tasks may still finish later, but their late result is intentionally
+            -- ignored for this queue build. Move on rather than stalling server-hop.
+            if pending > 0 then
+                nativeErrors = nativeErrors + pending
+                executorLog("WARN", string.format(
+                    "native browser batch timeout pending=%d pages=%d-%d",
+                    pending, index, batchEnd
+                ))
+            end
+
+            index = batchEnd + 1
+        end
+
+        local foundUseful = (#high + #mid) > 0
+        if nativeRows <= 0 then
+            state.nativeBrowserRetryAfter = os.time() + retryCooldown
+        else
+            state.nativeBrowserRetryAfter = 0
+        end
+
+        executorLog("HOP", string.format(
+            "native low-pop discovery pages=%d rows=%d errors=%d preferred3-7=%d(+%d) fallback2or8=%d crowded9-10=%d goodPage=%s retryIn=%ds",
+            nativePages, nativeRows, nativeErrors, #high,
+            math.max(0, #high - nativePreferredBefore), #mid, #low,
+            tostring(state.nativeBrowserGoodPage),
+            math.max(0, (tonumber(state.nativeBrowserRetryAfter) or 0) - os.time())
+        ))
+
+        return foundUseful
+    end
+
+    local function fetchOrder(sortOrder, apiLimit, numericEndpoint)
+        local cursor = ""
+        local dirPages = 0
+        while dirPages < maxPages do
+            local suffix = ""
+            if cursor ~= "" then
+                local encoded = cursor
+                pcall(function() encoded = HttpService:UrlEncode(cursor) end)
+                suffix = "&cursor=" .. encoded
+            end
+            local limit = tonumber(apiLimit) or 50
+            local url
+            if numericEndpoint then
+                local numericSort = (tostring(sortOrder) == "Asc") and "2" or "1"
+                url = string.format(
+                    "https://games.roblox.com/v1/games/%s/servers/0?sortOrder=%s&excludeFullGames=true&limit=%d%s",
+                    tostring(game.PlaceId), numericSort, limit, suffix
+                )
+            else
+                url = string.format(
+                    "https://games.roblox.com/v1/games/%s/servers/Public?sortOrder=%s&excludeFullGames=true&limit=%d%s",
+                    tostring(game.PlaceId), tostring(sortOrder), limit, suffix
+                )
+            end
+            local body = httpGetBody(url)
+            if not body then
+                hopDebug("queue refill HTTP failed order=" .. tostring(sortOrder) .. " page=" .. tostring(dirPages + 1) .. " numeric=" .. tostring(numericEndpoint == true) .. " limit=" .. tostring(apiLimit or 50))
+                break
+            end
+            local ok, decoded = pcall(function() return HttpService:JSONDecode(body) end)
+            if not ok or type(decoded) ~= "table" then
+                hopDebug("queue refill JSON failed order=" .. tostring(sortOrder) .. " page=" .. tostring(dirPages + 1) .. " numeric=" .. tostring(numericEndpoint == true) .. " limit=" .. tostring(apiLimit or 50))
+                break
+            end
+            dirPages = dirPages + 1
+            local data = decoded.data or {}
+            if sortOrder == "Desc" then pagesDesc=pagesDesc+1; rowsDesc=rowsDesc+#data
+            else pagesAsc=pagesAsc+1; rowsAsc=rowsAsc+#data end
+            for _, raw in ipairs(data) do
+                rememberDiscovered(raw)
+                if addServer(raw) then added = added + 1 end
+            end
+            cursor = tostring(decoded.nextPageCursor or "")
+            if cursor == "" or cursor == "nil" then break end
+        end
+    end
+
+    if (#high + #mid + #low) < refillThreshold or (#high + #mid + #low) < maxCandidates then
+        -- R9: use the game's own server browser first. It is not subject to the same
+        -- public server-list slice that has been returning only crowded servers.
+        fetchNativeBrowser()
+
+        -- Keep the public API as a fallback so server-hop still works if Blox Fruits
+        -- changes/removes the internal browser.
+        if (#high + #mid) < maxCandidates then
+            fetchOrder("Asc", 50, false)
+            -- Some current Roblox clients/API paths return an empty Asc/Public page.
+            -- Probe the numeric endpoint variant as a second independent fallback.
+            if rowsAsc == 0 then
+                fetchOrder("Asc", 50, true)
+            end
+        end
+
+        if (#high + #mid + #low) < maxCandidates then
+            fetchOrder("Desc", 50, false)
+        end
+
+        -- R9: if active server rows were returned but every one was rejected by
+        -- the long 2400s revisit cooldown, do NOT enter an endless refill loop.
+        -- Reuse the oldest live rows only as an emergency escape hatch.
+        if (#high + #mid + #low) == 0 and #discoveredRows > 0 then
+            local emergencyStages = {
+                math.max(180, tonumber(env.HopEmergencyCooldown) or 600),
+                math.max(60, tonumber(env.HopEmergencyHardCooldown) or 180),
+                0, -- final fail-open: any live non-current server is better than being stuck
+            }
+
+            for _, relaxedCooldown in ipairs(emergencyStages) do
+                local before = #high + #mid + #low
+                for _, raw in ipairs(discoveredRows) do
+                    if addServer(raw, relaxedCooldown) then
+                        added = added + 1
+                    end
+                end
+                local nowCount = #high + #mid + #low
+                if nowCount > before then
+                    executorLog("HOP", string.format(
+                        "EMERGENCY candidate recovery cooldown=%ds recovered=%d liveRows=%d",
+                        relaxedCooldown, nowCount - before, #discoveredRows
+                    ))
+                    break
+                end
+            end
+        end
+
+        if added > 0 then
+            shuffleServers(high); shuffleServers(mid); shuffleServers(low)
+            state.serverQueueBuiltAt = os.time()
+        end
+    end
+
+    -- PrimeHub 8.0: exhaust preferred 3-7 player servers first, then fallbacks.
+    local queue = {}
+    for _, server in ipairs(high) do
+        if #queue >= queueTarget then break end
+        queue[#queue+1] = server
+    end
+    for _, server in ipairs(mid) do
+        if #queue >= queueTarget then break end
+        queue[#queue+1] = server
+    end
+    for _, server in ipairs(low) do
+        if #queue >= queueTarget then break end
+        queue[#queue+1] = server
+    end
+
+    state.serverQueue = queue
+    state.serverQueueStrategy = HOP_QUEUE_STRATEGY
+    state.serverQueuePlaceId = currentPlaceId
+    saveRuntimeStateImmediate(state)
+
+    local result = {}
+    for _, server in ipairs(queue) do
+        if #result >= maxCandidates then break end
+        result[#result+1] = server
+    end
+
+    local selectedHigh, selectedMid, selectedLow = 0, 0, 0
+    for _, server in ipairs(result) do
+        if server._primeHubTier == "high" then selectedHigh=selectedHigh+1
+        elseif server._primeHubTier == "mid" then selectedMid=selectedMid+1
+        else selectedLow=selectedLow+1 end
+    end
+    hopDebug(string.format(
+        "strategy=speed-v80-lowpop-native-v80 queue=%d preferred3-7=%d fallback2or8=%d crowded9-10=%d selected=%d selectedP/F/C=%d/%d/%d nativePages=%d nativeRows=%d nativeErrors=%d discoveredRows=%d pagesDesc=%d pagesAsc=%d rowsDesc=%d rowsAsc=%d added=%d cooldown=%ss",
+        #queue, #high, #mid, #low, #result, selectedHigh, selectedMid, selectedLow,
+        nativePages, nativeRows, nativeErrors, #discoveredRows,
+        pagesDesc, pagesAsc, rowsDesc, rowsAsc, added, tostring(env.HopVisitedCooldown)
+    ))
+    if (#high + #mid) == 0 and #low > 0 then
+        executorLog("WARN", string.format(
+            "low-pop queue sample empty after native+API discovery; falling back to crowded servers (nativeRows=%d rowsDesc=%d rowsAsc=%d).",
+            nativeRows, rowsDesc, rowsAsc
+        ))
+    end
+    return result
+end
+
+local function findUnvisitedServer()
+    local candidates = collectUnvisitedServers(1)
+    return candidates[1]
+end
+
+local function getQueueOnTeleport()
+    if type(queue_on_teleport) == "function" then return queue_on_teleport end
+    if type(queueonteleport) == "function" then return queueonteleport end
+    if type(syn) == "table" and type(syn.queue_on_teleport) == "function" then return syn.queue_on_teleport end
+    if type(fluxus) == "table" and type(fluxus.queue_on_teleport) == "function" then return fluxus.queue_on_teleport end
+    return nil
+end
+
+local function quoteLuaLongString(text)
+    text = tostring(text or "")
+    for eqCount = 6, 40 do
+        local eq = string.rep("=", eqCount)
+        local closeToken = "]" .. eq .. "]"
+        if not string.find(text, closeToken, 1, true) then
+            return "[" .. eq .. "[" .. text .. closeToken
+        end
+    end
+    return string.format("%q", text)
+end
+
+local function queueReloadAfterTeleport()
+    local queueFn = getQueueOnTeleport()
+    if not queueFn then
+        AddLog("queue_on_teleport unavailable; PrimeHub 8.0 will not auto-reload after hop.", Color3.fromRGB(255, 200, 0))
+        return false
+    end
+
+    local selfSource = env.PrimeHubSelfSource
+    if type(selfSource) ~= "string" or #selfSource < 10000 then
+        local message = "Self-contained test source missing in memory; refusing hop so the test does not silently die."
+        executorLog("ERROR", message .. " bytes=" .. tostring(type(selfSource) == "string" and #selfSource or -1))
+        AddLog(message, Color3.fromRGB(255, 100, 100))
+        return false
+    end
+
+    local queuedAt = os.time()
+    local sourceLiteral = quoteLuaLongString(selfSource)
+    local teleportPayload = string.format([==[
+local __primeEnv = (type(getgenv) == "function" and getgenv()) or _G
+local __jobKey = tostring(game.PlaceId or "") .. ":" .. tostring(game.JobId or "")
+local __queueGuard = "PrimeHub-8.0-SPEED-TEST-R4-QUEUE:" .. __jobKey
+if __primeEnv.PrimeHubSpeedQueuedGuard == __queueGuard then
+    print("[PrimeHub 8.0] Duplicate queued bootstrap ignored before runtime load for JobId=" .. tostring(game.JobId))
+    return
+end
+__primeEnv.PrimeHubSpeedQueuedGuard = __queueGuard
+__primeEnv.PrimeHubTeleportResume = true
+__primeEnv.PrimeHubResumeAutoFruitSniper = %s
+__primeEnv.PrimeHubResumeAutoHop = %s
+__primeEnv.PrimeHubResumeFruitESP = %s
+__primeEnv.PrimeHubResumeOnlyServerSpawnedFruits = %s
+__primeEnv.PrimeHubResumeHopQueuedAt = %d
+
+local __src = %s
+__primeEnv.PrimeHubSelfSource = __src
+print("[PrimeHub 8.0] Self-contained teleport runtime received bytes=" .. tostring(#__src))
+local __fn, __err = loadstring(__src)
+if not __fn then
+    warn("[PrimeHub 8.0] Queued runtime compile failed: " .. tostring(__err))
+    return
+end
+return __fn()
+]==],
+        tostring(env.AutoFruitSniper == true),
+        tostring(env.AutoHop == true),
+        tostring(env.FruitESP == true),
+        tostring(env.OnlyServerSpawnedFruits == true),
+        queuedAt,
+        sourceLiteral
+    )
+
+    executorLog("PERF", string.format(
+        "queue payload prepared runtimeBytes=%d payloadBytes=%d",
+        #selfSource, #teleportPayload
+    ))
+
+    local ok, err = pcall(queueFn, teleportPayload)
+    if ok then
+        print(string.format(
+            "[PrimeHub] PrimeHub 8.0 SELF-CONTAINED payload queued. resume sniper=%s hop=%s esp=%s serverOnly=%s runtimeBytes=%d payloadBytes=%d",
+            tostring(env.AutoFruitSniper == true), tostring(env.AutoHop == true), tostring(env.FruitESP == true),
+            tostring(env.OnlyServerSpawnedFruits == true), #selfSource, #teleportPayload
+        ))
+        return true
+    end
+    executorLog("ERROR", "queue_on_teleport rejected self-contained payload: " .. tostring(err))
+    AddLog("Failed to queue PrimeHub 8.0 teleport payload: " .. tostring(err), Color3.fromRGB(255, 100, 100))
+    return false
+end
+
+local function shortJobId()
+    return string.sub(tostring(game.JobId or "--------"), 1, 8)
+end
+
+local function isRecognizedFruitName(name)
+    return type(name) == "string" and FruitMetadata[name] ~= nil
+end
+
+local function looksLikeFruitName(name)
+    if type(name) ~= "string" or name == "" then return false end
+    if isRecognizedFruitName(name) then return true end
+    return string.find(name, "Fruit", 1, true) ~= nil
+end
+
+local function isTargetFruitName(name)
+    -- PrimeHub 7.9: SniperAllFruits means ALL fruit-looking names, not only entries
+    -- recovered in the old FruitMetadata table. The shortlist is still respected
+    -- when SniperAllFruits is explicitly disabled.
+    if env.SniperAllFruits then
+        return looksLikeFruitName(name)
+    end
+    return TargetFruitNames[name] == true
+end
+
+local function isServerWorldFruitModel(instance)
+    if not instance or not instance.Parent or not instance:IsA("Model") then return false end
+
+    local okDesc, inWorkspace = pcall(function()
+        return instance:IsDescendantOf(workspace)
+    end)
+    if not okDesc or not inWorkspace then return false end
+
+    local handle = instance:FindFirstChild("Handle")
+    local handleReady = handle and handle:IsA("BasePart")
+
+    -- PrimeHub 8.0: WORLD_DROP is authoritative even when the model is nested
+    -- below Workspace. We still require a usable Handle before treating it as pickup-ready.
+    local okTag, tagged = pcall(function()
+        return CollectionService:HasTag(instance, "WORLD_DROP")
+    end)
+    if okTag and tagged then
+        return handleReady == true
+    end
+
+    -- Conservative delayed-tag fallback: keep the exact live structure we already proved,
+    -- and only accept it as a direct Workspace child to avoid broad false positives.
+    if instance.Parent ~= workspace then return false end
+    local rawName = tostring(instance.Name or "")
+    local trimmedName = string.match(rawName, "^%s*(.-)%s*$") or rawName
+    if string.lower(trimmedName) ~= "fruit" or not handleReady then return false end
+
+    local visual = instance:FindFirstChild("Fruit")
+    local animator = instance:FindFirstChild("FruitAnimator")
+    return visual ~= nil and visual:IsA("Model") and animator ~= nil
+end
+
+lo
