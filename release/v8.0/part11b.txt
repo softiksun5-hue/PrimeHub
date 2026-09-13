@@ -1,0 +1,114 @@
+roke(main, THEME.purple, 1.3, .18)
+    
+    local sidebar = Instance.new("Frame", main)
+    sidebar.Size = UDim2.new(0, 168, 1, 0)
+    sidebar.BackgroundColor3 = Color3.fromRGB(9, 7, 20)
+    sidebar.BorderSizePixel = 0
+    local sideLine = Instance.new("Frame", sidebar)
+    sideLine.Size = UDim2.new(0,1,1,0)
+    sideLine.Position = UDim2.new(1,-1,0,0)
+    sideLine.BackgroundColor3 = Color3.fromRGB(73, 38, 104)
+    sideLine.BorderSizePixel = 0
+    
+    local artGlow = Instance.new("Frame", sidebar)
+    artGlow.Size = UDim2.new(1, -18, 0, 94)
+    artGlow.Position = UDim2.new(0, 9, 0, 8)
+    artGlow.BackgroundColor3 = Color3.fromRGB(24, 13, 43)
+    artGlow.BorderSizePixel = 0
+    corner(artGlow, 12)
+    stroke(artGlow, THEME.purple, 1, .28)
+    gradient(artGlow, Color3.fromRGB(37, 20, 65), Color3.fromRGB(12, 9, 24), 90)
+    
+    local art = Instance.new("ImageLabel", artGlow)
+    art.Name = "CatGirlArt"
+    art.Size = UDim2.new(1, 0, 1, 0)
+    art.BackgroundTransparency = 1
+    art.ScaleType = Enum.ScaleType.Fit
+    art.ImageTransparency = 1
+    
+    local loadedPrimeHubArtAsset = nil
+    task.spawn(function()
+        local asset = ensurePrimeHubArtAsset()
+        if not asset and PRIMEHUB_ART_URL ~= "" then
+            pcall(function()
+                local body = httpGetBody(PRIMEHUB_ART_URL)
+                if body and type(writefile) == "function" then
+                    local decoded = decodePrimeHubBase64(body)
+                    if type(decoded) == "string" and #decoded > 1000 then
+                        writefile(PRIMEHUB_ART_FILE, decoded)
+                    elseif #body > 1000 then
+                        writefile(PRIMEHUB_ART_FILE, body)
+                    end
+                    asset = ensurePrimeHubArtAsset()
+                end
+            end)
+        end
+        if asset then
+            loadedPrimeHubArtAsset = asset
+            art.Image = asset
+            art.ImageTransparency = 0
+        else
+            executorLog("WARN", "PrimeHub cat-girl asset could not be registered by this executor")
+        end
+    end)
+    
+    local brand = label(sidebar, "PrimeHub", UDim2.new(1,-20,0,26), UDim2.new(0,12,0,106), 19, THEME.purpleHi, true)
+    local brandGrad = Instance.new("UIGradient", brand)
+    brandGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(169,76,255)),
+        ColorSequenceKeypoint.new(.5, Color3.fromRGB(239,105,255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(124,82,255)),
+    })
+    local versionLabel = label(sidebar, "BLOX FRUITS  •  8.0", UDim2.new(1,-20,0,16), UDim2.new(0,12,0,130), 9, THEME.muted, true)
+    
+    local navHolder = Instance.new("Frame", sidebar)
+    navHolder.Size = UDim2.new(1,-18,0,206)
+    navHolder.Position = UDim2.new(0,9,0,158)
+    navHolder.BackgroundTransparency = 1
+    local navLayout = Instance.new("UIListLayout", navHolder)
+    navLayout.Padding = UDim.new(0,7)
+    navLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    
+    local content = Instance.new("Frame", main)
+    content.Size = UDim2.new(1,-168,1,0)
+    content.Position = UDim2.new(0,168,0,0)
+    content.BackgroundTransparency = 1
+    
+    local top = Instance.new("Frame", content)
+    top.Size = UDim2.new(1,0,0,52)
+    top.BackgroundColor3 = Color3.fromRGB(10,8,20)
+    top.BorderSizePixel = 0
+    local topLine = Instance.new("Frame", top)
+    topLine.Size = UDim2.new(1,0,0,1); topLine.Position = UDim2.new(0,0,1,-1); topLine.BackgroundColor3 = Color3.fromRGB(65,34,91); topLine.BorderSizePixel=0
+    local pageTitle = label(top, "Dashboard", UDim2.new(0,250,0,22), UDim2.new(0,16,0,8), 16, THEME.text, true)
+    local pageSub = label(top, "PrimeHub is ready", UDim2.new(0,330,0,14), UDim2.new(0,16,0,29), 9, THEME.muted, false)
+    local minimizeBtn = button(top, "—", UDim2.new(0,30,0,28), UDim2.new(1,-74,0,12))
+    minimizeBtn.TextSize = 15
+    local closeBtn = button(top, "×", UDim2.new(0,30,0,28), UDim2.new(1,-38,0,12))
+    closeBtn.TextSize = 18
+
+    -- Compact floating PrimeHub launcher shown while the main window is minimized.
+    local miniLauncher = Instance.new("TextButton", gui)
+    miniLauncher.Name = "PrimeHubMiniLauncher"
+    miniLauncher.Size = UDim2.new(0,58,0,58)
+    miniLauncher.Position = UDim2.new(1,-78,.5,-29)
+    miniLauncher.BackgroundColor3 = Color3.fromRGB(18,11,32)
+    miniLauncher.BorderSizePixel = 0
+    miniLauncher.AutoButtonColor = false
+    miniLauncher.Text = ""
+    miniLauncher.Visible = false
+    miniLauncher.ZIndex = 50
+    corner(miniLauncher, 18)
+    stroke(miniLauncher, THEME.purpleHi, 1.5, .05)
+    gradient(miniLauncher, Color3.fromRGB(53,24,82), Color3.fromRGB(14,9,27), 45)
+
+    local miniArt = Instance.new("ImageLabel", miniLauncher)
+    miniArt.Size = UDim2.new(1,-4,1,-4)
+    miniArt.Position = UDim2.new(0,2,0,2)
+    miniArt.BackgroundTransparency = 1
+    miniArt.ScaleType = Enum.ScaleType.Crop
+    miniArt.ImageTransparency = 1
+    miniArt.ZIndex = 51
+    corner(miniArt, 16)
+
+    local miniFallback = label(miniL
