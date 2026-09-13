@@ -1,0 +1,90 @@
+art=input.Position; miniStartPos=miniLauncher.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if draggingMini and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
+            local d=input.Position-miniDragStart
+            if math.abs(d.X)+math.abs(d.Y) > 5 then miniMoved=true end
+            miniLauncher.Position=UDim2.new(miniStartPos.X.Scale,miniStartPos.X.Offset+d.X,miniStartPos.Y.Scale,miniStartPos.Y.Offset+d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if draggingMini and (input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch) then
+            draggingMini=false
+            if not miniMoved then setPrimeHubMinimized(false) end
+        end
+    end)
+    
+    local workersStarted=false
+    local function startWorkersIfLicensed()
+        if workersStarted or not licenseState.active then return false end
+        workersStarted=true
+        env.PrimeHubLicenseValid=true
+        startWorkers()
+        if env.PrimeHubLicenseRequired then
+            task.spawn(licenseRenewWorker)
+        end
+        AddLog("[PrimeHub] Runtime unlocked.",THEME.good)
+        return true
+    end
+    
+    local lastLicenseUiActive = false
+    local function refreshLicenseUI()
+        local on=licenseState.active
+        local becameActive = on and not lastLicenseUiActive
+        licenseStatus.Text=on and ("ACTIVE  "..tostring(licenseState.keyHint or "")) or tostring(licenseState.status or "LOCKED")
+        licenseStatus.TextColor3=on and THEME.good or THEME.bad
+        licenseMessage.Text=tostring(licenseState.message or "")
+        licenseDot.BackgroundColor3=on and THEME.good or THEME.bad
+        licenseMini.Text=on and "LICENSE ACTIVE" or "LICENSE LOCKED"
+        licenseMini.TextColor3=on and THEME.good or THEME.bad
+        activeBadgeText.Text=on and "ACTIVE" or "LOCKED"
+        activeBadgeText.TextColor3=on and THEME.good or THEME.bad
+        if licenseState.installationId then licenseDevice.Text="Device: "..string.sub(tostring(licenseState.installationId),1,28) end
+        local licenseExp=tonumber(licenseState.licenseExpiresAt) or 0
+        if on then
+            if licenseExp>0 then
+                local remaining=math.max(0,licenseExp-os.time())
+                local days=math.floor(remaining/86400)
+                local hours=math.floor((remaining%86400)/3600)
+                local minutes=math.floor((remaining%3600)/60)
+                licenseExpiry.Text="Expires: "..os.date("%d %b %Y",licenseExp)
+                if days>0 then
+                    licenseRemaining.Text=string.format("Time left: %dd %dh",days,hours)
+                elseif hours>0 then
+                    licenseRemaining.Text=string.format("Time left: %dh %dm",hours,minutes)
+                else
+                    licenseRemaining.Text=string.format("Time left: %dm",minutes)
+                end
+            else
+                licenseExpiry.Text="License: FOREVER"
+                licenseRemaining.Text="Time left: Unlimited"
+            end
+        else
+            licenseExpiry.Text="License: --"
+            licenseRemaining.Text="Time left: --"
+        end
+        if on then
+            statusLabel.Text="READY"; statusLabel.TextColor3=THEME.purpleHi; subStatus.Text="Server: "..shortJobId().."  •  licensed"
+            startWorkersIfLicensed()
+            if becameActive and currentPage == "License" then
+                switchPage("Dashboard")
+            end
+        else
+            statusLabel.Text="LOCKED"; statusLabel.TextColor3=THEME.bad; subStatus.Text="License required"
+            switchPage("License")
+        end
+        lastLicenseUiActive = on
+    end
+    onLicenseChanged(refreshLicenseUI)
+    
+    local initialState=initializeRuntime()
+    hopCountLabel.Text=tostring(hopCount); fruitCountLabel.Text=tostring(fruitCount); speedValue.Text=tostring(env.TweenSpeed)
+    local initialRatio=math.clamp(((tonumber(env.TweenSpeed) or 230)-50)/180,0,1); fill.Size=UDim2.new(initialRatio,0,1,0); knob.Position=UDim2.new(initialRatio,-8,.5,-8)
+    local qstate=loadRuntimeState(); queueCountLabel.Text=tostring(#(qstate.serverQueue or {})); queueInfo.Text=string.format("%d servers • %d min cooldown",tonumber(env.HopQueueTarget) or 200,math.floor((tonumber(env.HopVisitedCooldown) or 2400)/60)); teamInfo.Text="Preferred team: "..tostring(env.PreferredTeam)
+    
+    AddLog("[PrimeHub] PrimeHub 8.0 interface loaded.",THEME.purpleHi)
+    AddLog(string.format("Automation: Sniper=%s | AutoHop=%s | ESP=%s | Drops=%s", tostring(env.AutoFruitSniper), tostring(env.AutoHop), tostring(env.FruitESP), env.OnlyServerSpawnedFruits and "OFF" or "ON"), THEME.muted)
+    hopDebug("PrimeHub 8.0 loaded | PlaceId="..tostring(game.PlaceId).." JobId="..tostring(game.JobId))
+    hopDebug("Sea auto-detected="..tostring(getCurrentSea()).." | PlaceId="..tostring(game.PlaceId))
+    executorL
