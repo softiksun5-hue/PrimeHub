@@ -1,0 +1,90 @@
+auncher,"P",UDim2.new(1,0,1,0),UDim2.new(),24,THEME.purpleHi,true,Enum.TextXAlignment.Center)
+    miniFallback.ZIndex = 52
+
+    task.spawn(function()
+        local asset = loadedPrimeHubArtAsset or ensurePrimeHubArtAsset()
+        if asset then
+            miniArt.Image = asset
+            miniArt.ImageTransparency = 0
+            miniFallback.Visible = false
+        end
+    end)
+    
+    local pages = Instance.new("Frame", content)
+    pages.Size = UDim2.new(1,-24,1,-68)
+    pages.Position = UDim2.new(0,12,0,60)
+    pages.BackgroundTransparency = 1
+    
+    local pageMap, navMap = {}, {}
+    local function makePage(name)
+        local p = Instance.new("Frame", pages)
+        p.Name = name .. "Page"
+        p.Size = UDim2.new(1,0,1,0)
+        p.BackgroundTransparency = 1
+        p.Visible = false
+        pageMap[name] = p
+        return p
+    end
+    local dashboardPage = makePage("Dashboard")
+    local sniperPage = makePage("Sniper")
+    local logsPage = makePage("Logs")
+    local licensePage = makePage("License")
+    local settingsPage = makePage("Settings")
+    
+    local navInfo = {
+        {"Dashboard","DB"}, {"Sniper","FS"}, {"Logs","LG"}, {"License","KEY"}, {"Settings","SET"}
+    }
+    local currentPage = "License"
+    local function switchPage(name)
+        if env.PrimeHubLicenseRequired and not licenseState.active and name ~= "License" then name = "License" end
+        currentPage = name
+        for n,p in pairs(pageMap) do p.Visible = (n == name) end
+        for n,b in pairs(navMap) do
+            b.BackgroundColor3 = n == name and Color3.fromRGB(41,22,68) or Color3.fromRGB(15,11,28)
+            local st = b:FindFirstChildOfClass("UIStroke")
+            if st then st.Color = n == name and THEME.purpleHi or Color3.fromRGB(55,31,78) end
+        end
+        pageTitle.Text = name
+        local subs = {Dashboard="Runtime overview",Sniper="Fruit sniper controls",Logs="Live PrimeHub log",License="PrimeHub access",Settings="Movement and runtime settings"}
+        pageSub.Text = subs[name] or "PrimeHub 8.0"
+    end
+    for _,info in ipairs(navInfo) do
+        local b = button(navHolder, "", UDim2.new(1,0,0,34), UDim2.new())
+        b.LayoutOrder = #navMap + 1
+        local icon = label(b, info[2], UDim2.new(0,34,1,0), UDim2.new(0,8,0,0), 9, THEME.purpleHi, true, Enum.TextXAlignment.Center)
+        local txt = label(b, info[1], UDim2.new(1,-50,1,0), UDim2.new(0,46,0,0), 11, THEME.text, true)
+        navMap[info[1]] = b
+        b.MouseButton1Click:Connect(function() switchPage(info[1]) end)
+    end
+    
+    local bottomStatus = card(sidebar, UDim2.new(1,-18,0,48), UDim2.new(0,9,1,-58))
+    local licenseDot = Instance.new("Frame", bottomStatus)
+    licenseDot.Size=UDim2.new(0,8,0,8); licenseDot.Position=UDim2.new(0,10,0,12); licenseDot.BorderSizePixel=0; corner(licenseDot,8)
+    local licenseMini = label(bottomStatus,"LICENSE LOCKED",UDim2.new(1,-32,0,16),UDim2.new(0,25,0,6),9,THEME.bad,true)
+    local serverMini = label(bottomStatus,"Prime Cloud",UDim2.new(1,-32,0,14),UDim2.new(0,25,0,24),8,THEME.muted,false)
+    
+    -- Dashboard
+    local hero = card(dashboardPage, UDim2.new(1,0,0,82), UDim2.new())
+    gradient(hero, Color3.fromRGB(28,16,48), Color3.fromRGB(13,10,24), 0)
+    local heroGlow = stroke(hero, THEME.purple, 1, .15)
+    statusLabel = label(hero,"LOCKED",UDim2.new(0.55,-12,0,30),UDim2.new(0,14,0,10),20,THEME.purpleHi,true)
+    subStatus = label(hero,"License required",UDim2.new(0.7,-14,0,18),UDim2.new(0,14,0,43),10,THEME.muted,false)
+    local activeBadge = Instance.new("Frame", hero)
+    activeBadge.Size=UDim2.new(0,96,0,26); activeBadge.Position=UDim2.new(1,-110,0,28); activeBadge.BorderSizePixel=0; activeBadge.BackgroundColor3=Color3.fromRGB(24,17,39); corner(activeBadge,13); stroke(activeBadge,THEME.purple,1,.3)
+    local activeBadgeText=label(activeBadge,"LICENSE",UDim2.new(1,0,1,0),UDim2.new(),9,THEME.purpleHi,true,Enum.TextXAlignment.Center)
+    
+    local stats = Instance.new("Frame", dashboardPage); stats.BackgroundTransparency=1; stats.Size=UDim2.new(1,0,0,82); stats.Position=UDim2.new(0,0,0,94)
+    local function statCard(x,w,titleText,valueColor)
+        local c=card(stats,UDim2.new(w,-6,1,0),UDim2.new(x,0,0,0))
+        label(c,titleText,UDim2.new(1,-16,0,18),UDim2.new(0,10,0,8),9,THEME.muted,true)
+        local v=label(c,"0",UDim2.new(1,-16,0,32),UDim2.new(0,10,0,29),22,valueColor or THEME.purpleHi,true)
+        return v
+    end
+    hopCountLabel=statCard(0,.333,"SERVER HOPS",THEME.purpleHi)
+    fruitCountLabel=statCard(.333,.333,"FRUITS",THEME.pink)
+    local queueCountLabel=statCard(.666,.334,"QUEUE",Color3.fromRGB(124,130,255))
+    
+    local actionsCard = card(dashboardPage, UDim2.new(1,0,0,86), UDim2.new(0,0,0,188))
+    label(actionsCard,"QUICK ACTIONS",UDim2.new(1,-20,0,18),UDim2.new(0,12,0,7),9,THEME.muted,true)
+    local hopButton=button(actionsCard,"SERVER HOP",UDim2.new(.48,-6,0,34),UDim2.new(0,10,0,34))
+    local resetButton=button(actionsCard,"RESET COUNTERS",UDim2.new(.48
