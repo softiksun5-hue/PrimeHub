@@ -1,0 +1,277 @@
+-- PrimeHub 8.0 | SELF-CONTAINED LAUNCHER
+-- PrimeHub 8.0 production release. Self-contained server-hop persistence.
+-- Server-hop persistence is embedded in queue_on_teleport; no executor workspace file is required.
+local __primeEnv = (type(getgenv) == "function" and getgenv()) or _G
+local __primeSource = [====================[
+-- PrimeHub 8.0 | Fruit Sniper
+-- Stable production fruit-sniper core, fully rebranded and wrapped with Prime licensing/UI.
+-- were destroyed by obfuscation; this version focuses on preserving recovered behavior
+-- while fixing runtime issues that made the readable reconstruction non-functional.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local CollectionService = game:GetService("CollectionService")
+
+local LocalPlayer = Players.LocalPlayer
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 15)
+assert(Remotes, "[PRIMEHUB] ReplicatedStorage.Remotes was not found")
+local CommF_ = Remotes:WaitForChild("CommF_", 15)
+assert(CommF_, "[PRIMEHUB] Remotes.CommF_ was not found")
+
+local env = (type(getgenv) == "function" and getgenv()) or _G
+local PRIMEHUB_BOOT_TICK = tick()
+
+-- PrimeHub 8.0 singleton guard.
+-- Prevents duplicate queued/manual bootstraps in the same Roblox server
+-- from starting a second runtime and resetting automation state.
+local __primeHubJobKey = tostring(game.PlaceId or "") .. ":" .. tostring(game.JobId or "")
+local __primeHubGuardKey = "PrimeHub-8.0:" .. __primeHubJobKey
+if env.PrimeHubActiveBootstrapKey == __primeHubGuardKey then
+    print("[PrimeHub 8.0] Duplicate runtime ignored for JobId=" .. tostring(game.JobId))
+    return
+end
+env.PrimeHubActiveBootstrapKey = __primeHubGuardKey
+-- PrimeHub 8.0 is self-contained: the outer launcher injects the exact runtime source into getgenv().
+-- queue_on_teleport carries that source to the next server; readfile/isfile are not required.
+local PRIMEHUB_VERSION = "8.0"
+local PRIMEHUB_LICENSE_VERSION = "5.0" -- compatibility with the currently registered license build
+local PRIMEHUB_PRODUCT_ID = "primehub"
+local PRIMEHUB_BUILD_ID = "primehub-5.0"
+local PRIMEHUB_LICENSE_SERVER = tostring(env.PrimeHubLicenseServer or "https://prime-license.softik-prime.workers.dev"):gsub("/+$", "")
+local PRIMEHUB_LICENSE_FILE = "PrimeHub_License.json"
+
+env.PrimeHubLicenseValid = false
+env.PrimeHubLicenseRequired = true
+env.PrimeHubRuntimeId = (tonumber(env.PrimeHubRuntimeId) or 0) + 1
+local RUNTIME_ID = env.PrimeHubRuntimeId
+
+local function runtimeActive()
+    return env.PrimeHubRuntimeId == RUNTIME_ID and (env.PrimeHubLicenseRequired ~= true or env.PrimeHubLicenseValid == true)
+end
+
+local function executorLog(level, message)
+    if not env.PrimeHubDebug then return end
+    local stamp = os.date("%H:%M:%S")
+    local line = string.format("[PRIMEHUB][%s][%s] %s", stamp, tostring(level or "INFO"), tostring(message))
+    if level == "ERROR" or level == "WARN" then
+        local ok = pcall(function() warn(line) end)
+        if not ok then pcall(function() print(line) end) end
+    else
+        pcall(function() print(line) end)
+    end
+end
+
+local function hopDebug(message)
+    executorLog("HOP", message)
+end
+
+local function teamDebug(message)
+    executorLog("TEAM", message)
+end
+
+local VISITED_SERVERS_FILE = "PrimeHub_State.json"
+
+-- PrimeHub 7.9 automation safety: a fresh/manual launch always starts with automation OFF.
+-- During an actual PrimeHub server hop, queue_on_teleport explicitly carries the
+-- user's current toggle state so enabled automation can continue on the next server.
+local __resumeAutomation = env.PrimeHubTeleportResume == true
+local __resumeAutoFruitSniper = env.PrimeHubResumeAutoFruitSniper == true
+local __resumeAutoHop = env.PrimeHubResumeAutoHop == true
+local __resumeFruitESP = env.PrimeHubResumeFruitESP == true
+local __resumeOnlyServerSpawnedFruits = env.PrimeHubResumeOnlyServerSpawnedFruits == true
+local __resumeHopQueuedAt = tonumber(env.PrimeHubResumeHopQueuedAt) or 0
+env.PrimeHubTeleportResume = nil
+env.PrimeHubResumeAutoFruitSniper = nil
+env.PrimeHubResumeAutoHop = nil
+env.PrimeHubResumeFruitESP = nil
+env.PrimeHubResumeOnlyServerSpawnedFruits = nil
+env.PrimeHubResumeHopQueuedAt = nil
+
+local __resumeHopTransitSeconds = (__resumeAutomation and __resumeHopQueuedAt > 0)
+    and math.max(0, os.time() - __resumeHopQueuedAt) or nil
+
+env.AutoFruitSniper = __resumeAutomation and __resumeAutoFruitSniper or false
+env.AutoHop = __resumeAutomation and __resumeAutoHop or false
+env.FruitESP = __resumeAutomation and __resumeFruitESP or false
+env.OnlyServerSpawnedFruits = __resumeAutomation and __resumeOnlyServerSpawnedFruits or true
+env.TweenSpeed = 230
+env.FlyOffset = 5
+-- PrimeHub 8.0: ~3s startup observation window instead of ~9s.
+env.DeepScanInitialDelay = tonumber(env.DeepScanInitialDelay) or 0.75
+env.DeepScanRetries = math.max(1, tonumber(env.DeepScanRetries) or 4)
+env.DeepScanRetryDelay = math.max(0.15, tonumber(env.DeepScanRetryDelay) or 0.75)
+env.ScanInterval = math.max(0.5, tonumber(env.ScanInterval) or 1.5)
+-- R9: objects already tagged WORLD_DROP when we join can be stale replication shells.
+-- Confirm their Handle continuously before spending time on team selection / flight.
+env.WorldDropStartupConfirm = math.max(1.0, tonumber(env.WorldDropStartupConfirm) or 4.0)
+env.WorldDropRuntimeConfirm = math.max(0.2, tonumber(env.WorldDropRuntimeConfirm) or 0.65)
+env.WorldDropStartupWindow = math.max(2.0, tonumber(env.WorldDropStartupWindow) or 6.0)
+-- R9 experiment: if a startup WORLD_DROP loses Handle/Fruit/FruitAnimator,
+-- keep the server briefly and watch whether the structure comes back.
+env.WorldDropRecoveryGrace = math.max(1.0, tonumber(env.WorldDropRecoveryGrace) or 3.0)
+env.StoreRetries = 3
+env.StoreReacquireTimeout = tonumber(env.StoreReacquireTimeout) or 4
+env.StorePostPickupDelay = tonumber(env.StorePostPickupDelay) or 0.35
+env.LocalTestMode = false
+
+-- PrimeHub 7.9 server-hop tuning. Mixed discovery samples both ends of the
+-- Roblox public-server list, then interleaves populated and medium servers.
+env.HopMinFreeSlots = tonumber(env.HopMinFreeSlots) or 1
+env.HopAttemptLimit = tonumber(env.HopAttemptLimit) or 6
+env.HopRetryDelay = tonumber(env.HopRetryDelay) or 0.75
+env.HopFailureWindow = tonumber(env.HopFailureWindow) or 3
+env.InitialHopAfterScan = env.InitialHopAfterScan ~= false
+env.SuppressTeleportErrorPrompt = false
+env.PrimeHubDebug = env.PrimeHubDebug ~= false
+env.HopPreferNativeBrowser = env.HopPreferNativeBrowser ~= false
+
+env.AutoHopInterval = tonumber(env.AutoHopInterval) or 5
+env.PostFruitHopDelay = tonumber(env.PostFruitHopDelay) or 3
+env.HopVisitedCooldown = tonumber(env.HopVisitedCooldown) or 2400
+if env.HopVisitedCooldown == 3600 then env.HopVisitedCooldown = 2400 end
+env.HopNoCandidateDelay = tonumber(env.HopNoCandidateDelay) or 5
+-- R9: keep a large discovered queue and reuse it until it is actually depleted.
+env.HopQueueTarget = math.max(50, tonumber(env.HopQueueTarget) or 240)
+env.HopQueueRefillThreshold = math.max(5, tonumber(env.HopQueueRefillThreshold) or 18)
+-- Cap fallback API paging so an empty/refused browser cannot stall hopping for many seconds.
+env.HopQueueMaxPages = math.max(2, math.min(4, tonumber(env.HopQueueMaxPages) or 3))
+env.HopQueueFreshTtl = math.max(120, tonumber(env.HopQueueFreshTtl) or 900)
+
+-- R9: prefer Blox Fruits' own __ServerBrowser for low-pop discovery.
+-- Roblox's public server-list API can expose only a limited / crowded slice.
+env.HopNativeBrowserEnabled = env.HopNativeBrowserEnabled ~= false
+env.HopNativeBrowserProbePages = math.max(6, math.min(24, tonumber(env.HopNativeBrowserProbePages) or 12))
+env.HopNativeBrowserBatch = math.max(2, math.min(6, tonumber(env.HopNativeBrowserBatch) or 4))
+env.HopNativeBrowserRetryCooldown = math.max(10, tonumber(env.HopNativeBrowserRetryCooldown) or 30)
+
+-- R9 fail-open: never sit forever on "Searching for server candidates".
+-- Normal 2400s cooldown is preserved while fresh candidates exist.
+-- Only when discovery returns active servers but all are filtered as recently visited,
+-- progressively relax visit age so hopping can continue.
+env.HopEmergencyCooldown = math.max(180, tonumber(env.HopEmergencyCooldown) or 600)
+env.HopEmergencyHardCooldown = math.max(60, tonumber(env.HopEmergencyHardCooldown) or 180)
+
+env.HopNativeBrowserPreferredTarget = math.max(
+    8,
+    tonumber(env.HopNativeBrowserPreferredTarget) or 24
+)
+env.HopNativeBrowserBatchTimeout = math.max(
+    1.0,
+    tonumber(env.HopNativeBrowserBatchTimeout) or 3.0
+)
+
+-- PrimeHub 8.0: all 2-10 player servers remain eligible, but 3-7 player
+-- servers are preferred first. This reduces competition without forcing only near-empty servers.
+env.HopQueueMinPlayers = math.max(2, tonumber(env.HopQueueMinPlayers) or 2)
+env.HopQueueMaxPlayers = math.max(env.HopQueueMinPlayers, tonumber(env.HopQueueMaxPlayers) or 10)
+env.HopPreferredMinPlayers = math.max(env.HopQueueMinPlayers, tonumber(env.HopPreferredMinPlayers) or 3)
+env.HopPreferredMaxPlayers = math.min(env.HopQueueMaxPlayers, math.max(env.HopPreferredMinPlayers, tonumber(env.HopPreferredMaxPlayers) or 7))
+env.HopPreferredPlayers = tonumber(env.HopPreferredPlayers) or 5
+env.HopMinPlayers = env.HopQueueMinPlayers
+env.HopMaxPlayers = env.HopQueueMaxPlayers
+
+-- Conservative autoreg-farm detector. It never skips a fruit that is already visible;
+-- it only gives an obviously bot-heavy JobId a longer revisit cooldown after scanning.
+env.BotServerScreening = env.BotServerScreening ~= false
+env.BotServerCooldown = math.max(tonumber(env.HopVisitedCooldown) or 2400, tonumber(env.BotServerCooldown) or 14400)
+
+-- PrimeHub 7.9 scanner origin filter. By default Player-dropped fruits is OFF, so only
+-- tagged/current server WORLD_DROP models become targets. The UI can opt player drops back in.
+env.ScanDescendants = env.ScanDescendants ~= false
+env.ScanDebug = env.ScanDebug ~= false
+env.ScanDebugNamesLimit = math.max(1, tonumber(env.ScanDebugNamesLimit) or 12)
+if env.OnlyServerSpawnedFruits == nil then env.OnlyServerSpawnedFruits = false end
+if env.SniperAllFruits == nil then env.SniperAllFruits = true end
+
+-- Automatically join a team only when a target fruit is present.
+env.AutoTeam = env.AutoTeam ~= false
+env.PreferredTeam = (env.PreferredTeam == "Marines" and "Marines") or "Pirates"
+env.TeamReadyTimeout = tonumber(env.TeamReadyTimeout) or 10
+env.TeamRetryDelay = tonumber(env.TeamRetryDelay) or 0.75
+
+local TargetFruits = {
+    dough = "Dough Fruit",
+    quake = "Quake Fruit",
+    rumble = "Rumble Fruit",
+    drag = "Dragon Fruit",
+    light = "Light Fruit",
+    ice = "Ice Fruit",
+    magu = "Magma Fruit",
+    dark = "Dark Fruit",
+    kits = "Kitsune Fruit",
+    port = "Portal Fruit",
+    budd = "Buddha Fruit",
+    leop = "Leopard Fruit",
+}
+
+local TargetFruitNames = {}
+for _, fruitName in pairs(TargetFruits) do
+    TargetFruitNames[fruitName] = true
+end
+
+local FruitMetadata = {
+    ["Barrier Fruit"] = {id="Barrier-Barrier", rarity="Rare", color=3447003},
+    ["Blizzard Fruit"] = {id="Blizzard-Blizzard", rarity="Legendary", color=16711935},
+    ["Bomb Fruit"] = {id="Bomb-Bomb", rarity="Common", color=8421504},
+    ["Buddha Fruit"] = {id="Buddha-Buddha", rarity="Legendary", color=16711935},
+    ["Chop Fruit"] = {id="Chop-Chop", rarity="Common", color=8421504},
+    ["Control Fruit"] = {id="Control-Control", rarity="Mythical", color=16711680},
+    ["Dark Fruit"] = {id="Dark-Dark", rarity="Uncommon", color=3447003},
+    ["Diamond Fruit"] = {id="Diamond-Diamond", rarity="Rare", color=3447003},
+    ["Dough Fruit"] = {id="Dough-Dough", rarity="Mythical", color=16711680},
+    ["Dragon Fruit"] = {id="Dragon-Dragon", rarity="Mythical", color=16711680},
+    ["Falcon Fruit"] = {id="Falcon-Falcon", rarity="Uncommon", color=3447003},
+    ["Flame Fruit"] = {id="Flame-Flame", rarity="Uncommon", color=3447003},
+    ["Gas Fruit"] = {id="Gas-Gas", rarity="Legendary", color=16711935},
+    ["Ghost Fruit"] = {id="Ghost-Ghost", rarity="Rare", color=3447003},
+    ["Gravity Fruit"] = {id="Gravity-Gravity", rarity="Mythical", color=16711680},
+    ["Ice Fruit"] = {id="Ice-Ice", rarity="Uncommon", color=3447003},
+    ["Kitsune Fruit"] = {id="Kitsune-Kitsune", rarity="Mythical", color=16711680},
+    ["Leopard Fruit"] = {id="Leopard-Leopard", rarity="Mythical", color=16711680},
+    ["Light Fruit"] = {id="Light-Light", rarity="Rare", color=3447003},
+    ["Love Fruit"] = {id="Love-Love", rarity="Legendary", color=16711935},
+    ["Magma Fruit"] = {id="Magma-Magma", rarity="Rare", color=3447003},
+    ["Mammoth Fruit"] = {id="Mammoth-Mammoth", rarity="Mythical", color=16711680},
+    ["Pain Fruit"] = {id="Pain-Pain", rarity="Legendary", color=16711935},
+    ["Phoenix Fruit"] = {id="Phoenix-Phoenix", rarity="Legendary", color=16711935},
+    ["Portal Fruit"] = {id="Portal-Portal", rarity="Legendary", color=16711935},
+    ["Quake Fruit"] = {id="Quake-Quake", rarity="Legendary", color=16711935},
+    ["Rocket Fruit"] = {id="Rocket-Rocket", rarity="Common", color=8421504},
+    ["Rubber Fruit"] = {id="Rubber-Rubber", rarity="Rare", color=3447003},
+    ["Rumble Fruit"] = {id="Rumble-Rumble", rarity="Legendary", color=16711935},
+    ["Sand Fruit"] = {id="Sand-Sand", rarity="Uncommon", color=3447003},
+    ["Shadow Fruit"] = {id="Shadow-Shadow", rarity="Mythical", color=16711680},
+    ["Smoke Fruit"] = {id="Smoke-Smoke", rarity="Common", color=8421504},
+    ["Sound Fruit"] = {id="Sound-Sound", rarity="Legendary", color=16711935},
+    ["Spider Fruit"] = {id="Spider-Spider", rarity="Legendary", color=16711935},
+    ["Spike Fruit"] = {id="Spike-Spike", rarity="Common", color=8421504},
+    ["Spin Fruit"] = {id="Spin-Spin", rarity="Common", color=8421504},
+    ["Spirit Fruit"] = {id="Spirit-Spirit", rarity="Mythical", color=16711680},
+    ["Spring Fruit"] = {id="Spring-Spring", rarity="Common", color=8421504},
+    ["Striker Fruit"] = {id="Striker-Striker", rarity="Legendary", color=16711935},
+    ["T-Rex Fruit"] = {id="T-Rex-T-Rex", rarity="Mythical", color=16711680},
+    ["Venom Fruit"] = {id="Venom-Venom", rarity="Mythical", color=16711680},
+    ["Yeti Fruit"] = {id="Yeti-Yeti", rarity="Rare", color=3447003},
+}
+
+local FruitStorageIdToName = {}
+for fruitName, metadata in pairs(FruitMetadata) do
+    if type(metadata) == "table" and type(metadata.id) == "string" and metadata.id ~= "" then
+        FruitStorageIdToName[metadata.id] = fruitName
+    end
+end
+
+local SafeZones = {
+    ["Sea 1"] = {name="Starter Pirate (Safe Zone)", pos=Vector3.new(-2717, 25, 1968)},
+    ["Sea 2"] = {name="Cafe (Safe Zone)", pos=Vector3.new(-380, 75, 297)},
+    ["Sea 3"] = {name="Castle on the Sea (Safe Zone)", pos=Vector3.new(-5036, 320, -3179)},
+}
+
+local SEA_PLACE_IDS = {
+    ["Sea 1"] = {
+        [2753915549] = true,
+        [85211729168715] = true, -
