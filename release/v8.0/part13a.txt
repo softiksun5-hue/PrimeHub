@@ -1,0 +1,115 @@
+og("SCAN",string.format("scanner mode=%s allFruits=%s dropFilter=%s | strategy=%s preferredPlayers=3-7 queue=%d cooldown=%ss",env.OnlyServerSpawnedFruits and "world-drop-fast" or (env.ScanDescendants and "descendants" or "top-level"),tostring(env.SniperAllFruits),env.OnlyServerSpawnedFruits and "SERVER_ONLY" or "OFF",HOP_QUEUE_STRATEGY,tonumber(env.HopQueueTarget) or 200,tostring(env.HopVisitedCooldown)))
+    hopDebug("__ServerBrowser="..tostring(ReplicatedStorage:FindFirstChild("__ServerBrowser")))
+    
+    -- Start locked, then let the completed license check choose the final page.
+    -- This avoids the old race where a successful cached-license check opened Dashboard
+    -- and the next line immediately forced the UI back to License.
+    switchPage("License")
+    task.spawn(function()
+        initializeLicense()
+        refreshLicenseUI()
+    end)
+end
+buildPrimeHubUI()
+
+env.PrimeHubServerHop = ServerHop
+env.PrimeHubDebugHop = function()
+    local browser = nil
+    pcall(function() browser = ReplicatedStorage:FindFirstChild("__ServerBrowser") end)
+    local info = {
+        runtimeId = RUNTIME_ID,
+        active = runtimeActive(),
+        autoHop = env.AutoHop,
+        holdingHighTier = env.HoldingHighTierFruit,
+        hopping = hopping,
+        placeId = game.PlaceId,
+        jobId = game.JobId,
+        nativeBrowser = browser and browser.ClassName or nil,
+        teleportFailureSerial = teleportFailureSerial,
+        lastTeleportFailure = lastTeleportFailure,
+    }
+    executorLog("INFO", "PrimeHubDebugHop nativeBrowser=" .. tostring(info.nativeBrowser)
+        .. " autoHop=" .. tostring(info.autoHop)
+        .. " hopping=" .. tostring(info.hopping)
+        .. " failureSerial=" .. tostring(info.teleportFailureSerial))
+    return info
+end
+
+env.PrimeHubScanDebug = function()
+    local fruits, stats = scanWorkspaceForFruits("manual")
+    executorLog("SCAN", "manual result targetCount=" .. tostring(#fruits))
+    return fruits, stats
+end
+
+env.PrimeHubScanFruits = scanWorkspaceForFruits
+env.PrimeHubDeepScanNow = deepScanWorker
+env.PrimeHubProcessFruit = processFruit
+env.PrimeHubDumpHeldFruits = function()
+    return dumpHeldFruitTools("manual inventory dump")
+end
+
+env.PrimeHubStoreHeldFruit = function()
+    dumpHeldFruitTools("manual store requested")
+    local tool = findFruitTool(nil, nil)
+    if not tool then
+        AddLog("Manual store: no held fruit Tool found.", Color3.fromRGB(255, 180, 80))
+        return false, "no_tool"
+    end
+
+    AddLog("Manual store requested for " .. tostring(tool.Name), Color3.fromRGB(120, 200, 255))
+    local stored, reason, detail = storeFruit(tool, tool.Name, nil)
+    if stored then
+        env.HoldingHighTierFruit = false
+        AddLog("Manual store success: " .. tostring(tool.Name), Color3.fromRGB(0, 255, 100))
+    else
+        AddLog("Manual store failed: " .. tostring(reason) .. " / " .. tostring(detail), Color3.fromRGB(255, 100, 100))
+    end
+    return stored, reason, detail
+end
+env.PrimeHubChooseTeam = function(team)
+    if team == "Marines" then
+        env.PreferredTeam = "Marines"
+    else
+        env.PreferredTeam = "Pirates"
+    end
+    return ensureTeamReady("manual PrimeHubChooseTeam", env.PreferredTeam)
+end
+
+env.PrimeHubServerQueueStatus = function()
+    local state = loadRuntimeState()
+    local queue = type(state.serverQueue) == "table" and state.serverQueue or {}
+    local highCount, midCount, lowCount = 0, 0, 0
+    for _, server in ipairs(queue) do
+        local playing = tonumber(server.playing) or 0
+        if playing >= 8 then highCount=highCount+1
+        elseif playing >= 5 then midCount=midCount+1
+        else lowCount=lowCount+1 end
+    end
+    local info = {
+        queued=#queue, highQueued=highCount, midQueued=midCount, lowQueued=lowCount,
+        strategy=tostring(state.serverQueueStrategy or ""), target=env.HopQueueTarget,
+        builtAt=tonumber(state.serverQueueBuiltAt) or 0, minPlayers=env.HopQueueMinPlayers,
+        maxPlayers=env.HopQueueMaxPlayers, cooldown=env.HopVisitedCooldown,
+        botServerCooldown=env.BotServerCooldown, botServerScreening=env.BotServerScreening,
+    }
+    hopDebug(string.format(
+        "QUEUE STATUS strategy=%s queued=%d high=%d mid=%d low=%d target=%d eligibleBand=%d-%d cooldown=%ss botCooldown=%ss builtAt=%s",
+        info.strategy, info.queued, info.highQueued, info.midQueued, info.lowQueued, tonumber(info.target) or 0,
+        tonumber(info.minPlayers) or 0, tonumber(info.maxPlayers) or 0, tostring(info.cooldown),
+        tostring(info.botServerCooldown), tostring(info.builtAt)
+    ))
+    return info
+end
+
+env.PrimeHubTeamStatus = function()
+    local root = getPlayerRoot()
+    local info = {
+        team = currentTeamName(),
+        preferred = env.PreferredTeam,
+        autoTeam = env.AutoTeam,
+        character = getPlayerCharacter(),
+        root = root,
+    }
+    teamDebug(string.format(
+        "STATUS team=%s preferred=%s auto=%s character=%s root=%s",
+        tostring(info.team), tostring(info.pr
