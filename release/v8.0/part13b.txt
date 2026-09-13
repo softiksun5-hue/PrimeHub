@@ -1,0 +1,88 @@
+eferred), tostring(info.autoTeam), tostring(info.character), tostring(info.root)
+    ))
+    return info
+end
+
+
+env.PrimeHubActivateLicense = activatePrimeHubLicense
+env.PrimeHubRenewLicense = renewPrimeHubLicense
+env.PrimeHubDeactivateLicense = deactivatePrimeHubLicense
+env.PrimeHubLicenseStatus = function() return licenseState end
+env.PrimeHubStop = function()
+    if env.PrimeHubRuntimeId == RUNTIME_ID then
+        env.PrimeHubRuntimeId = RUNTIME_ID + 1
+    end
+    cleanupFlight()
+    destroyFruitESP()
+    pcall(function() gui:Destroy() end)
+end
+
+env.PrimeHubSelfCheck = function()
+    return {
+        runtimeActive = runtimeActive(),
+        placeId = game.PlaceId,
+        jobId = tostring(game.JobId or ""),
+        requestAvailable = getRequestFunction() ~= nil,
+        queueOnTeleportAvailable = getQueueOnTeleport() ~= nil,
+        filesystemAvailable = type(readfile) == "function" and type(writefile) == "function",
+        commF = CommF_ ~= nil,
+        team = currentTeamName(),
+        preferredTeam = env.PreferredTeam,
+        autoTeam = env.AutoTeam,
+        characterReady = getPlayerRoot() ~= nil,
+        targetFruitsVisible = #scanWorkspaceForFruits(),
+        autoSniper = env.AutoFruitSniper,
+        autoHop = env.AutoHop,
+        fruitESP = env.FruitESP,
+        tweenSpeed = env.TweenSpeed,
+        hopMinFreeSlots = env.HopMinFreeSlots,
+        hopPreferredPlayers = env.HopPreferredPlayers,
+        hopMinPlayers = env.HopMinPlayers,
+        hopMaxPlayers = env.HopMaxPlayers,
+        autoHopInterval = env.AutoHopInterval,
+        postFruitHopDelay = env.PostFruitHopDelay,
+        hopVisitedCooldown = env.HopVisitedCooldown,
+        hopQueueTarget = env.HopQueueTarget,
+        hopQueueRefillThreshold = env.HopQueueRefillThreshold,
+        hopQueueMaxPages = env.HopQueueMaxPages,
+        hopQueueMinPlayers = env.HopQueueMinPlayers,
+        hopQueueMaxPlayers = env.HopQueueMaxPlayers,
+        hopPreferredMinPlayers = env.HopPreferredMinPlayers,
+        hopPreferredMaxPlayers = env.HopPreferredMaxPlayers,
+        onlyServerSpawnedFruits = env.OnlyServerSpawnedFruits,
+        dropFilter = env.OnlyServerSpawnedFruits,
+        hopQueueStrategy = HOP_QUEUE_STRATEGY,
+        botServerScreening = env.BotServerScreening,
+        botServerCooldown = env.BotServerCooldown,
+        currentSea = getCurrentSea(),
+        scanDescendants = env.ScanDescendants,
+        scanDebug = env.ScanDebug,
+        sniperAllFruits = env.SniperAllFruits,
+        hopAttemptLimit = env.HopAttemptLimit,
+        hopRetryDelay = env.HopRetryDelay,
+        initialHopAfterScan = env.InitialHopAfterScan,
+        speedTest = true,
+        selfContained = type(env.PrimeHubSelfSource) == "string",
+        selfSourceBytes = type(env.PrimeHubSelfSource) == "string" and #env.PrimeHubSelfSource or 0,
+        scanPerfCalls = scanPerfCalls,
+        scanPerfFastCalls = scanPerfFastCalls,
+        scanPerfFullCalls = scanPerfFullCalls,
+        scanPerfAverageMs = scanPerfCalls > 0 and (scanPerfTotalMs / scanPerfCalls) or 0,
+        lastHopTransitSeconds = __resumeHopTransitSeconds,
+        teleportFailureSerial = teleportFailureSerial,
+        suppressTeleportErrorPrompt = env.SuppressTeleportErrorPrompt,
+        primeHubVersion = PRIMEHUB_VERSION,
+        licenseActive = licenseState.active,
+        licenseStatus = licenseState.status,
+        licenseKeyHint = licenseState.keyHint,
+        licenseExpiresAt = licenseState.licenseExpiresAt,
+    }
+end
+]====================]
+__primeEnv.PrimeHubSelfSource = __primeSource
+print("[PrimeHub 8.0] Launcher loaded self-contained runtime bytes=" .. tostring(#__primeSource))
+local __primeFn, __primeErr = loadstring(__primeSource)
+if not __primeFn then
+    error("[PrimeHub 8.0] Initial runtime compile failed: " .. tostring(__primeErr))
+end
+return __primeFn()
