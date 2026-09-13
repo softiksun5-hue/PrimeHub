@@ -1,0 +1,142 @@
+         n=n+1; out[n]=string.char(a * 4 + math.floor(b / 16))
+            if cc then
+                n=n+1; out[n]=string.char((b % 16) * 16 + math.floor(cc / 4))
+                if d then
+                    n=n+1; out[n]=string.char((cc % 4) * 64 + d)
+                end
+            end
+        end
+    end
+    return table.concat(out)
+end
+
+local function ensurePrimeHubArtAsset()
+    local asset = nil
+    local function registerExisting()
+        if type(isfile) ~= "function" or not isfile(PRIMEHUB_ART_FILE) then return nil end
+        local registered = nil
+        if type(getcustomasset) == "function" then
+            local ok, value = pcall(getcustomasset, PRIMEHUB_ART_FILE)
+            if ok then registered = value end
+        elseif type(getsynasset) == "function" then
+            local ok, value = pcall(getsynasset, PRIMEHUB_ART_FILE)
+            if ok then registered = value end
+        end
+        return registered
+    end
+
+    asset = registerExisting()
+    if asset then return asset end
+
+    pcall(function()
+        if type(writefile) == "function" then
+            local png = decodePrimeHubBase64(PRIMEHUB_ART_EMBEDDED_B64)
+            if type(png) == "string" and #png > 1000 then writefile(PRIMEHUB_ART_FILE, png) end
+        end
+    end)
+    asset = registerExisting()
+    return asset
+end
+
+local gui = nil
+local function buildPrimeHubUI()
+    local guiParent = CoreGui
+    if type(gethui) == "function" then
+        local ok, hui = pcall(gethui)
+        if ok and hui then guiParent = hui end
+    end
+    
+    local oldGui = guiParent:FindFirstChild("PrimeHubUI") or CoreGui:FindFirstChild("PrimeHubUI")
+    if oldGui then pcall(function() oldGui:Destroy() end) end
+    
+    gui = Instance.new("ScreenGui")
+    gui.Name = "PrimeHubUI"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    if type(syn) == "table" and type(syn.protect_gui) == "function" then pcall(syn.protect_gui, gui) end
+    gui.Parent = guiParent
+    
+    local THEME = {
+        bg = Color3.fromRGB(8, 7, 18),
+        panel = Color3.fromRGB(13, 11, 24),
+        panel2 = Color3.fromRGB(18, 13, 34),
+        purple = Color3.fromRGB(169, 76, 255),
+        purpleHi = Color3.fromRGB(209, 105, 255),
+        pink = Color3.fromRGB(255, 91, 200),
+        text = Color3.fromRGB(243, 239, 248),
+        muted = Color3.fromRGB(168, 161, 184),
+        good = Color3.fromRGB(113, 255, 174),
+        bad = Color3.fromRGB(255, 103, 135),
+        line = Color3.fromRGB(105, 50, 153),
+    }
+    
+    local function corner(obj, radius)
+        local c = Instance.new("UICorner", obj)
+        c.CornerRadius = UDim.new(0, radius or 10)
+        return c
+    end
+    local function stroke(obj, color, thickness, transparency)
+        local s = Instance.new("UIStroke", obj)
+        s.Color = color or THEME.line
+        s.Thickness = thickness or 1
+        s.Transparency = transparency or 0
+        return s
+    end
+    local function gradient(obj, a, b, rot)
+        local g = Instance.new("UIGradient", obj)
+        g.Color = ColorSequence.new(a, b)
+        g.Rotation = rot or 0
+        return g
+    end
+    local function label(parent, text, size, pos, textSize, color, bold, align)
+        local l = Instance.new("TextLabel", parent)
+        l.BackgroundTransparency = 1
+        l.Size = size
+        l.Position = pos or UDim2.new()
+        l.Text = text or ""
+        l.TextColor3 = color or THEME.text
+        l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+        l.TextSize = textSize or 12
+        l.TextXAlignment = align or Enum.TextXAlignment.Left
+        l.TextYAlignment = Enum.TextYAlignment.Center
+        l.TextTruncate = Enum.TextTruncate.AtEnd
+        return l
+    end
+    local function button(parent, text, size, pos)
+        local b = Instance.new("TextButton", parent)
+        b.Size = size
+        b.Position = pos or UDim2.new()
+        b.BackgroundColor3 = THEME.panel2
+        b.BorderSizePixel = 0
+        b.AutoButtonColor = false
+        b.Text = text
+        b.TextColor3 = THEME.text
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 11
+        corner(b, 8)
+        local s = stroke(b, THEME.line, 1, .15)
+        b.MouseEnter:Connect(function() s.Color = THEME.purpleHi end)
+        b.MouseLeave:Connect(function() s.Color = THEME.line end)
+        return b, s
+    end
+    local function card(parent, size, pos)
+        local f = Instance.new("Frame", parent)
+        f.Size = size
+        f.Position = pos or UDim2.new()
+        f.BackgroundColor3 = THEME.panel
+        f.BorderSizePixel = 0
+        corner(f, 10)
+        stroke(f, THEME.line, 1, .45)
+        return f
+    end
+    
+    local main = Instance.new("Frame", gui)
+    main.Name = "PrimeWindow"
+    main.Size = UDim2.new(0, 640, 0, 430)
+    main.Position = UDim2.new(0.5, -320, 0.5, -215)
+    main.BackgroundColor3 = THEME.bg
+    main.BorderSizePixel = 0
+    main.ClipsDescendants = true
+    corner(main, 14)
+    local mainStroke = st
