@@ -1,0 +1,344 @@
+ = pcall(function()
+                return CommF_:InvokeServer("StoreFruit", storageId, tool)
+            end)
+            lastResult = result
+            executorLog("STORE", "remote returned callOk=" .. tostring(callOk) .. " type=" .. type(result) .. " value=" .. tostring(result))
+
+            if not callOk then
+                AddLog("StoreFruit remote error: " .. tostring(result), Color3.fromRGB(255, 100, 100))
+            else
+                if result == true then
+                    waitForToolToLeaveInventory(tool, 1.5)
+                    return true, "stored"
+                end
+
+                if type(result) == "number" then
+                    AddLog(
+                        "Storage full (capacity " .. tostring(result) .. ") for " .. tostring(tool.Name),
+                        Color3.fromRGB(255, 120, 80)
+                    )
+                    return false, "full", result
+                end
+
+                if type(result) == "string" then
+                    local lower = string.lower(result)
+                    if string.find(lower, "full", 1, true) or string.find(lower, "capacity", 1, true) then
+                        AddLog("Storage full: " .. result, Color3.fromRGB(255, 120, 80))
+                        return false, "full", result
+                    elseif string.find(lower, "stored", 1, true) or string.find(lower, "success", 1, true) then
+                        waitForToolToLeaveInventory(tool, 1.5)
+                        return true, "stored"
+                    end
+                end
+            end
+
+            if waitForToolToLeaveInventory(tool, 0.8) then
+                -- Confirm whether it vanished because it was stored or got replaced.
+                local replacement = reacquireHeldFruitTool(nil, preferredName, excludeSet, 0.35, expectedOriginal)
+                if not replacement then
+                    executorLog("STORE", "fruit Tool left inventory after remote; treating as stored")
+                    return true, "stored"
+                end
+                tool = replacement
+                executorLog("STORE", "old Tool vanished but replacement exists; continuing with ptr=" .. tostring(tool))
+            end
+        end
+
+        if attempt < retries then
+            AddLog(string.format("Store failed (attempt %d), retrying...", attempt), Color3.fromRGB(255, 200, 0))
+            task.wait(0.6)
+        end
+    end
+
+    AddLog("StoreFruit failed after all ids/retries; last response: " .. tostring(lastResult), Color3.fromRGB(255, 100, 100))
+    dumpHeldFruitTools("storeFruit exhausted retries")
+    return false, "failed", lastResult
+end
+
+local function handleHighTierFruit(tool, metadata)
+    if not metadata or metadata.rarity ~= "Mythical" then
+        env.ViajandoAteAFruta = false
+        return false
+    end
+
+    env.HoldingHighTierFruit = true
+    env.AutoHop = false
+
+    AddLog("⚠️ FULL STORAGE: Holding " .. tostring(tool.Name) .. "!", Color3.fromRGB(255, 100, 100))
+
+    local safeZone = getSafeZone()
+    if not safeZone then return false end
+
+    AddLog("Navigating to Safe Zone: " .. safeZone.name, Color3.fromRGB(0, 200, 255))
+    if statusLabel then
+        statusLabel.Text = "🛡️ HEADING TO SAFE ZONE"
+        statusLabel.TextColor3 = Color3.fromRGB(0, 200, 255)
+    end
+
+    moveTo(safeZone.pos + Vector3.new(0, 5, 0), 230, 45)
+    cleanupFlight()
+
+    if statusLabel then
+        statusLabel.Text = "🛡️ SAFE: " .. safeZone.name
+        statusLabel.TextColor3 = Color3.fromRGB(0, 255, 100)
+    end
+    AddLog("Arrived at Safe Zone. Auto-Hop permanently stopped.", Color3.fromRGB(0, 255, 100))
+    return true
+end
+
+local processingFruit = false
+local activeWorldDropTarget = nil
+local postFruitHopDeadline = nil
+
+local function schedulePostFruitHop(reason)
+    if env.HoldingHighTierFruit then return end
+    local delay = math.max(1, tonumber(env.PostFruitHopDelay) or 10)
+    postFruitHopDeadline = tick() + delay
+    executorLog("HOP", "post-fruit hop scheduled in " .. tostring(delay) .. "s reason=" .. tostring(reason))
+end
+
+local function processFruit(fruit)
+    if processingFruit or not runtimeActive() then return false end
+    if not fruit or not fruit.Parent or not isDroppedFruit(fruit) then return false end
+
+    -- PrimeHub 7.9: take the lock BEFORE waiting for team/character setup. Stage 18
+    -- could let deepScan + periodicSniper enter processFruit simultaneously.
+    processingFruit = true
+    activeWorldDropTarget = fruit
+
+    local ok, result = pcall(function()
+        local preferredName = fruitNameFromTool(fruit)
+        if preferredName == "Fruit " then preferredName = nil end
+        local expectedOriginal = scanOriginalName(fruit) or normalizeFruitStorageIdFromName(preferredName)
+
+        executorLog("PICKUP", string.format(
+            "target ptr=%s name=%q OriginalName=%q preferred=%q",
+            tostring(fruit), tostring(fruit.Name), tostring(expectedOriginal), tostring(preferredName)
+        ))
+
+        local teamReady = ensureTeamReady("processFruit: " .. tostring(fruit.Name))
+        if not teamReady then
+            AddLog("Fruit detected but character is not ready yet: " .. tostring(fruit.Name), Color3.fromRGB(255, 180, 80))
+            return false
+        end
+
+        -- Snapshot after team selection has completed so delayed inventory restoration
+        -- is already present and cannot be mistaken for this pickup.
+        local beforePickup = snapshotHeldFruitTools()
+        local tool = nil
+
+        local pickupOffset = isServerWorldFruitModel(fruit) and 2 or (tonumber(env.FlyOffset) or 5)
+        local flightSpeed = math.max(50, tonumber(env.TweenSpeed) or 230)
+
+        local firstHandle = getDroppedFruitPart(fruit)
+        local firstRoot = getPlayerRoot()
+        if firstHandle and firstRoot then
+            local firstTarget = firstHandle.Position + Vector3.new(0, pickupOffset, 0)
+            local firstDistance = (firstRoot.Position - firstTarget).Magnitude
+
+            if firstDistance > 8 then
+                local flightTimeout = math.clamp((firstDistance / flightSpeed) + 15, 15, 120)
+                executorLog("PICKUP", string.format(
+                    "FLIGHT start distance=%.0f speed=%.0f timeout=%.1fs target=%s",
+                    firstDistance, flightSpeed, flightTimeout, tostring(fruit.Name)
+                ))
+
+                env.ViajandoAteAFruta = true
+                local flightDeadline = tick() + flightTimeout
+                local lastRemaining = firstDistance
+                local targetLeftWorkspace = false
+                local targetStructureLost = false
+                while runtimeActive() and tick() < flightDeadline do
+                    local inWorkspace = false
+                    pcall(function() inWorkspace = fruit:IsDescendantOf(workspace) end)
+                    if not fruit.Parent or not inWorkspace then
+                        targetLeftWorkspace = true
+                        break
+                    end
+                    if not isServerWorldFruitModel(fruit) then
+                        targetStructureLost = true
+                        break
+                    end
+
+                    local handle = getDroppedFruitPart(fruit)
+                    local root = getPlayerRoot()
+                    local character = LocalPlayer.Character
+                    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+                    if not handle or not root or not humanoid or humanoid.Health <= 0 then break end
+
+                    local targetPosition = handle.Position + Vector3.new(0, pickupOffset, 0)
+                    local remaining = (root.Position - targetPosition).Magnitude
+                    lastRemaining = remaining
+                    if remaining <= 8 then break end
+
+                    if not applyFlight(targetPosition, flightSpeed) then break end
+                    task.wait(0.1)
+                end
+                cleanupFlight()
+
+                if (targetLeftWorkspace or targetStructureLost) and lastRemaining > 20 then
+                    executorLog("EVENT", string.format(
+                        "WORLD_DROP became unavailable during flight remaining=%.0f leftWorkspace=%s structureLost=%s; aborting immediately",
+                        lastRemaining, tostring(targetLeftWorkspace), tostring(targetStructureLost)
+                    ))
+                    return false
+                end
+
+                local endRoot = getPlayerRoot()
+                local endHandle = getDroppedFruitPart(fruit)
+                if endRoot and endHandle then
+                    local remaining = (endRoot.Position - (endHandle.Position + Vector3.new(0, pickupOffset, 0))).Magnitude
+                    executorLog("PICKUP", string.format("FLIGHT end remaining=%.1f target=%s", remaining, tostring(fruit.Name)))
+                end
+            end
+        end
+
+        local deadline = tick() + 5.0
+
+        while not tool and runtimeActive() and tick() < deadline do
+            if not fruit.Parent then
+                tool = findPickedUpTool(beforePickup, preferredName, expectedOriginal)
+                if tool then break end
+            end
+
+            local handle = getDroppedFruitPart(fruit)
+            local root = getPlayerRoot()
+            if handle and root then
+                local targetPosition = handle.Position + Vector3.new(0, pickupOffset, 0)
+                local distance = (root.Position - targetPosition).Magnitude
+
+                if distance <= 8 then
+                    root.CFrame = handle.CFrame + Vector3.new(0, pickupOffset, 0)
+                    root.Velocity = Vector3.zero
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.RotVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                else
+                    applyFlight(targetPosition, flightSpeed)
+                end
+            elseif not root then
+                AddLog("Flight/pickup failed: root unavailable.", Color3.fromRGB(255, 100, 100))
+                break
+            end
+
+            task.wait(0.1)
+            tool = findPickedUpTool(beforePickup, preferredName, expectedOriginal)
+        end
+        cleanupFlight()
+
+        if not tool then
+            executorLog("PICKUP", string.format(
+                "strict pickup failed for name=%q OriginalName=%q; unrelated inventory Tools ignored",
+                tostring(preferredName), tostring(expectedOriginal)
+            ))
+            AddLog("Pickup timed out: " .. tostring(fruit.Name), Color3.fromRGB(255, 180, 80))
+            return false
+        end
+
+        if not toolMatchesFruitIdentity(tool, preferredName, expectedOriginal) then
+            executorLog("WARN", "Rejected mismatched pickup Tool: " .. tostring(tool.Name))
+            AddLog("Pickup identity mismatch; ignoring " .. tostring(tool.Name), Color3.fromRGB(255, 180, 80))
+            return false
+        end
+
+        updateStats(nil, fruitCount + 1)
+        AddLog("Picked up: " .. tostring(tool.Name), Color3.fromRGB(0, 255, 100))
+        executorLog("STORE", "pickup detected ptr=" .. tostring(tool) .. " name=" .. tostring(tool.Name)
+            .. " parent=" .. toolParentName(tool) .. " expectedOriginal=" .. tostring(expectedOriginal))
+        task.wait(tonumber(env.StorePostPickupDelay) or 0.35)
+
+        local refreshedTool, replacedAfterPickup = reacquireHeldFruitTool(
+            tool, preferredName, beforePickup, env.StoreReacquireTimeout, expectedOriginal
+        )
+        if refreshedTool then
+            if replacedAfterPickup then
+                executorLog("STORE", "post-pickup Tool replacement detected: old=" .. tostring(tool)
+                    .. " new=" .. tostring(refreshedTool))
+            end
+            tool = refreshedTool
+        else
+            dumpHeldFruitTools("post-pickup reacquire failed")
+            AddLog("Could not reacquire the picked fruit; continuing hop cycle.", Color3.fromRGB(255, 180, 80))
+            return false
+        end
+
+        local stored, storeReason, storeDetail = storeFruit(
+            tool, preferredName, beforePickup, expectedOriginal
+        )
+        task.wait(0.5)
+
+        if stored then
+            AddLog("Stored: " .. tostring(tool.Name), Color3.fromRGB(0, 255, 100))
+            env.HoldingHighTierFruit = false
+            return true
+        end
+
+        local metadata = FruitMetadata[preferredName or tool.Name] or FruitMetadata[tool.Name]
+
+        if storeReason == "full" then
+            return handleHighTierFruit(tool, metadata)
+        end
+
+        AddLog(
+            "Could not confirm storage (" .. tostring(storeReason) .. "): " .. tostring(storeDetail),
+            Color3.fromRGB(255, 100, 100)
+        )
+
+        -- PrimeHub 7.9: an unconfirmed remote response must not permanently kill the
+        -- server-hop loop. The strict identity checks above already prevent us from
+        -- storing a completely unrelated inventory fruit.
+        env.HoldingHighTierFruit = false
+        AddLog("Storage attempt failed; AutoHop will continue.", Color3.fromRGB(255, 200, 0))
+        return false
+    end)
+
+    processingFruit = false
+    activeWorldDropTarget = nil
+    if not ok then
+        AddLog("processFruit error: " .. tostring(result), Color3.fromRGB(255, 100, 100))
+        cleanupFlight()
+        if not env.HoldingHighTierFruit then schedulePostFruitHop("process error") end
+        return false
+    end
+
+    if not env.HoldingHighTierFruit then
+        schedulePostFruitHop(result == true and "fruit resolved" or "fruit attempt finished")
+    end
+    return result == true
+end
+
+local seenTeleportPrompts = setmetatable({}, {__mode = "k"})
+
+local function collectPromptText(prompt)
+    local collected = ""
+    if not prompt then return collected end
+    local descendants = {}
+    pcall(function() descendants = prompt:GetDescendants() end)
+    for _, node in ipairs(descendants) do
+        local isText = false
+        pcall(function()
+            isText = node:IsA("TextLabel") or node:IsA("TextButton")
+        end)
+        if isText and type(node.Text) == "string" then
+            collected = collected .. " " .. node.Text
+        end
+    end
+    return collected
+end
+
+local function observeTeleportErrorPrompt()
+    -- IMPORTANT: Stage 11 destroyed the prompt instance itself. Roblox kept the
+    -- modal dimmer, leaving the whole screen grey. PrimeHub 7.9 only observes/logs.
+    local promptGui = nil
+    pcall(function() promptGui = CoreGui:FindFirstChild("RobloxPromptGui") end)
+    local overlay = nil
+    pcall(function() overlay = promptGui and promptGui:FindFirstChild("promptOverlay") end)
+    if not overlay then return nil end
+
+    local children = {}
+    pcall(function() children = overlay:GetChildren() end)
+    for _, prompt in ipairs(children) do
+        local text = collectPromptText(prompt)
+        local lower = string.lower(text)
+        local isHopFailure = string.find(lower, "773", 1, true)
+            or string.find(lower, "server is full", 1
