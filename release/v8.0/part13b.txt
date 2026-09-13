@@ -61,7 +61,7 @@ env.PrimeHubSelfCheck = function()
         hopAttemptLimit = env.HopAttemptLimit,
         hopRetryDelay = env.HopRetryDelay,
         initialHopAfterScan = env.InitialHopAfterScan,
-        speedTest = true,
+        speedTest = false,
         selfContained = type(env.PrimeHubSelfSource) == "string",
         selfSourceBytes = type(env.PrimeHubSelfSource) == "string" and #env.PrimeHubSelfSource or 0,
         scanPerfCalls = scanPerfCalls,
