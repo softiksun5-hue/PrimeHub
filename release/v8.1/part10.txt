@@ -1,0 +1,247 @@
+        if fallback then return fallback, fallback ~= oldTool end
+        task.wait(0.1)
+    until tick() >= deadline or not runtimeActive()
+
+    return nil, false
+end
+
+local function getStoreFruitCandidates(tool, preferredName, expectedOriginal)
+    local candidates = {}
+    local seen = {}
+
+    local function push(value)
+        if type(value) ~= "string" or value == "" or seen[value] then return end
+        seen[value] = true
+        candidates[#candidates + 1] = value
+    end
+
+    -- PrimeHub 7.9: the dropped fruit identity is authoritative. This prevents a
+    -- different inventory fruit from injecting the wrong storage ID.
+    push(expectedOriginal)
+
+    -- Current Blox Fruits tools commonly expose the exact storage key here.
+    local okOriginal, originalName = pcall(function()
+        return tool:GetAttribute("OriginalName")
+    end)
+    if okOriginal then push(originalName) end
+
+    local metadata = FruitMetadata[tool.Name]
+    if metadata then push(metadata.id) end
+
+    if preferredName then
+        local preferredMeta = FruitMetadata[preferredName]
+        if preferredMeta then push(preferredMeta.id) end
+        local preferredBase = tostring(preferredName):gsub(" Fruit$", "")
+        if preferredBase ~= "" then
+            push(preferredBase .. "-" .. preferredBase)
+            push(preferredBase)
+        end
+    end
+
+    -- Legacy fallback used by older versions/scripts: "Dough Fruit" -> "Dough-Dough".
+    local baseName = tostring(tool.Name or ""):gsub(" Fruit$", "")
+    if baseName ~= "" then
+        if string.find(baseName, "-", 1, true) then
+            push(baseName)
+        else
+            push(baseName .. "-" .. baseName)
+            push(baseName)
+        end
+    end
+
+    return candidates
+end
+
+isToolStillHeld = function(tool)
+    if not tool or not tool.Parent then return false end
+    local character = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack") or LocalPlayer.Backpack
+    return tool.Parent == character or tool.Parent == backpack
+end
+
+local function waitForToolToLeaveInventory(tool, timeoutSeconds)
+    local deadline = tick() + (tonumber(timeoutSeconds) or 2.5)
+    repeat
+        if not isToolStillHeld(tool) then return true end
+        task.wait(0.1)
+    until tick() >= deadline
+    return not isToolStillHeld(tool)
+end
+
+local function storeFruit(tool, preferredName, excludeSet, expectedOriginal)
+    executorLog("STORE", "storeFruit() entered; incoming ptr=" .. tostring(tool) .. " name=" .. tostring(tool and tool.Name))
+
+    local reacquired, changed = reacquireHeldFruitTool(tool, preferredName, excludeSet, env.StoreReacquireTimeout, expectedOriginal)
+    tool = reacquired
+    if not tool then
+        dumpHeldFruitTools("storeFruit missing before unequip")
+        AddLog("StoreFruit: held fruit Tool could not be reacquired.", Color3.fromRGB(255, 100, 100))
+        return false, "missing_tool"
+    end
+    if changed then
+        executorLog("STORE", "reacquired replacement Tool before unequip: ptr=" .. tostring(tool) .. " name=" .. tostring(tool.Name))
+    end
+
+    executorLog("STORE", string.format(
+        "pre-unequip ptr=%s name=%q parent=%s OriginalName=%q",
+        tostring(tool), tostring(tool.Name), toolParentName(tool), tostring(safeToolOriginalName(tool))
+    ))
+
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        local uqOk, uqErr = pcall(function() humanoid:UnequipTools() end)
+        executorLog("STORE", "UnequipTools ok=" .. tostring(uqOk) .. " err=" .. tostring(uqErr))
+        task.wait(0.2)
+    end
+
+    -- Unequip itself can swap/recreate the instance; reacquire again.
+    local afterUnequip, swapped = reacquireHeldFruitTool(tool, preferredName, excludeSet, 1.5, expectedOriginal)
+    if afterUnequip then
+        tool = afterUnequip
+        if swapped then
+            executorLog("STORE", "Tool instance changed during unequip; using replacement ptr=" .. tostring(tool))
+        end
+    end
+
+    if not tool or not isToolStillHeld(tool) then
+        dumpHeldFruitTools("after UnequipTools: target missing")
+        return false, "missing_tool_after_unequip"
+    end
+
+    local candidates = getStoreFruitCandidates(tool, preferredName, expectedOriginal)
+    executorLog("STORE", "candidate ids for " .. tostring(tool.Name) .. ": [" .. table.concat(candidates, ", ") .. "]")
+    if #candidates == 0 then
+        AddLog("StoreFruit: no storage id for " .. tostring(tool.Name), Color3.fromRGB(255, 100, 100))
+        return false, "no_id"
+    end
+
+    local retries = math.max(1, tonumber(env.StoreRetries) or 3)
+    local lastResult = nil
+
+    for attempt = 1, retries do
+        for _, storageId in ipairs(candidates) do
+            -- Reacquire before every remote invocation in case the previous call/equip mutated it.
+            local current, replaced = reacquireHeldFruitTool(tool, preferredName, excludeSet, 0.5, expectedOriginal)
+            if current then
+                tool = current
+                if replaced then executorLog("STORE", "Tool replaced between attempts -> " .. tostring(tool)) end
+            end
+
+            if not tool or not isToolStillHeld(tool) then
+                dumpHeldFruitTools("tool disappeared before remote")
+                return true, "stored"
+            end
+
+            AddLog(
+                string.format("Store attempt %d/%d: %s -> %s", attempt, retries, tostring(tool.Name), storageId),
+                Color3.fromRGB(120, 200, 255)
+            )
+            executorLog("STORE", string.format(
+                "InvokeServer StoreFruit id=%q ptr=%s parent=%s OriginalName=%q",
+                storageId, tostring(tool), toolParentName(tool), tostring(safeToolOriginalName(tool))
+            ))
+
+            local callOk, result = pcall(function()
+                return CommF_:InvokeServer("StoreFruit", storageId, tool)
+            end)
+            lastResult = result
+            executorLog("STORE", "remote returned callOk=" .. tostring(callOk) .. " type=" .. type(result) .. " value=" .. tostring(result))
+
+            if not callOk then
+                AddLog("StoreFruit remote error: " .. tostring(result), Color3.fromRGB(255, 100, 100))
+            else
+                if result == true then
+                    waitForToolToLeaveInventory(tool, 1.5)
+                    return true, "stored"
+                end
+
+                if type(result) == "number" then
+                    AddLog(
+                        "Storage full (capacity " .. tostring(result) .. ") for " .. tostring(tool.Name),
+                        Color3.fromRGB(255, 120, 80)
+                    )
+                    return false, "full", result
+                end
+
+                if type(result) == "string" then
+                    local lower = string.lower(result)
+                    if string.find(lower, "full", 1, true) or string.find(lower, "capacity", 1, true) then
+                        AddLog("Storage full: " .. result, Color3.fromRGB(255, 120, 80))
+                        return false, "full", result
+                    elseif string.find(lower, "stored", 1, true) or string.find(lower, "success", 1, true) then
+                        waitForToolToLeaveInventory(tool, 1.5)
+                        return true, "stored"
+                    end
+                end
+            end
+
+            if waitForToolToLeaveInventory(tool, 0.8) then
+                -- Confirm whether it vanished because it was stored or got replaced.
+                local replacement = reacquireHeldFruitTool(nil, preferredName, excludeSet, 0.35, expectedOriginal)
+                if not replacement then
+                    executorLog("STORE", "fruit Tool left inventory after remote; treating as stored")
+                    return true, "stored"
+                end
+                tool = replacement
+                executorLog("STORE", "old Tool vanished but replacement exists; continuing with ptr=" .. tostring(tool))
+            end
+        end
+
+        if attempt < retries then
+            AddLog(string.format("Store failed (attempt %d), retrying...", attempt), Color3.fromRGB(255, 200, 0))
+            task.wait(0.6)
+        end
+    end
+
+    AddLog("StoreFruit failed after all ids/retries; last response: " .. tostring(lastResult), Color3.fromRGB(255, 100, 100))
+    dumpHeldFruitTools("storeFruit exhausted retries")
+    return false, "failed", lastResult
+end
+
+local function handleHighTierFruit(tool, metadata)
+    if not metadata or metadata.rarity ~= "Mythical" then
+        env.ViajandoAteAFruta = false
+        return false
+    end
+
+    env.HoldingHighTierFruit = true
+    env.AutoHop = false
+
+    AddLog("⚠️ FULL STORAGE: Holding " .. tostring(tool.Name) .. "!", Color3.fromRGB(255, 100, 100))
+
+    local safeZone = getSafeZone()
+    if not safeZone then return false end
+
+    AddLog("Navigating to Safe Zone: " .. safeZone.name, Color3.fromRGB(0, 200, 255))
+    if statusLabel then
+        statusLabel.Text = "🛡️ HEADING TO SAFE ZONE"
+        statusLabel.TextColor3 = Color3.fromRGB(0, 200, 255)
+    end
+
+    moveTo(safeZone.pos + Vector3.new(0, 5, 0), 230, 45)
+    cleanupFlight()
+
+    if statusLabel then
+        statusLabel.Text = "🛡️ SAFE: " .. safeZone.name
+        statusLabel.TextColor3 = Color3.fromRGB(0, 255, 100)
+    end
+    AddLog("Arrived at Safe Zone. Auto-Hop permanently stopped.", Color3.fromRGB(0, 255, 100))
+    return true
+end
+
+local processingFruit = false
+local activeWorldDropTarget = nil
+local postFruitHopDeadline = nil
+
+local function schedulePostFruitHop(reason)
+    if env.HoldingHighTierFruit then return end
+    local delay = math.max(1, tonumber(env.PostFruitHopDelay) or 10)
+    postFruitHopDeadline = tick() + delay
+    executorLog("HOP", "post-fruit hop scheduled in " .. tostring(delay) .. "s reason=" .. tostring(reason))
+end
+
+local function processFruit(fruit)
+    if processingFruit or not runtimeActive() then return false end
+    if not fruit or not fruit.Parent or not isDroppedFruit(fruit) then return false end
+
