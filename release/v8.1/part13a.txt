@@ -1,0 +1,140 @@
+    local licenseCard=card(licensePage,UDim2.new(1,0,0,178),UDim2.new())
+    local lockGlyph=label(licenseCard,"PRIME ACCESS",UDim2.new(1,-24,0,26),UDim2.new(0,12,0,12),15,THEME.purpleHi,true)
+    local licenseStatus=label(licenseCard,"LOCKED",UDim2.new(1,-24,0,20),UDim2.new(0,12,0,45),11,THEME.bad,true)
+    local licenseMessage=label(licenseCard,"Enter a PrimeHub license key",UDim2.new(1,-24,0,18),UDim2.new(0,12,0,67),9,THEME.muted,false)
+    local keyBox=Instance.new("TextBox",licenseCard); keyBox.Size=UDim2.new(1,-24,0,36); keyBox.Position=UDim2.new(0,12,0,96); keyBox.BackgroundColor3=Color3.fromRGB(8,7,17); keyBox.BorderSizePixel=0; keyBox.PlaceholderText="PRIME-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"; keyBox.PlaceholderColor3=Color3.fromRGB(100,93,112); keyBox.TextColor3=THEME.text; keyBox.Font=Enum.Font.Code; keyBox.TextSize=11; keyBox.ClearTextOnFocus=false; corner(keyBox,8); stroke(keyBox,THEME.line,1,.25)
+    local activateButton=button(licenseCard,"ACTIVATE PRIMEHUB",UDim2.new(.62,-6,0,32),UDim2.new(0,12,0,140))
+    local deactivateButton=button(licenseCard,"DEACTIVATE",UDim2.new(.38,-18,0,32),UDim2.new(.62,6,0,140))
+    local licenseInfo=card(licensePage,UDim2.new(1,0,0,112),UDim2.new(0,0,0,190))
+    local licenseBuild=label(licenseInfo,"Build: PrimeHub 8.1",UDim2.new(1,-20,0,18),UDim2.new(0,12,0,10),9,THEME.muted,true)
+    local licenseDevice=label(licenseInfo,"Device: --",UDim2.new(1,-20,0,18),UDim2.new(0,12,0,34),9,THEME.muted,false)
+    local licenseExpiry=label(licenseInfo,"License: --",UDim2.new(1,-20,0,18),UDim2.new(0,12,0,58),9,THEME.muted,false)
+    local licenseRemaining=label(licenseInfo,"Time left: --",UDim2.new(1,-20,0,18),UDim2.new(0,12,0,82),9,THEME.muted,false)
+    activateButton.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            local ok, err=activatePrimeHubLicense(keyBox.Text)
+            if ok then AddLog("[PrimeHub] License activated: "..tostring(licenseState.keyHint or "OK"),THEME.good)
+            else AddLog("[PrimeHub] License rejected: "..tostring(err),THEME.bad) end
+        end)
+    end)
+    deactivateButton.MouseButton1Click:Connect(function() deactivatePrimeHubLicense() end)
+    
+    -- Settings page
+    local speedCard=card(settingsPage,UDim2.new(1,0,0,104),UDim2.new())
+    label(speedCard,"FLIGHT SPEED",UDim2.new(.5,0,0,20),UDim2.new(0,12,0,10),11,THEME.text,true)
+    local speedValue=label(speedCard,"230",UDim2.new(.5,-12,0,20),UDim2.new(.5,0,0,10),12,THEME.purpleHi,true,Enum.TextXAlignment.Right)
+    local track=Instance.new("Frame",speedCard); track.Size=UDim2.new(1,-28,0,8); track.Position=UDim2.new(0,14,0,53); track.BackgroundColor3=Color3.fromRGB(34,25,47); track.BorderSizePixel=0; corner(track,4)
+    local fill=Instance.new("Frame",track); fill.BackgroundColor3=THEME.purple; fill.BorderSizePixel=0; fill.Size=UDim2.new(1,0,1,0); corner(fill,4); gradient(fill,THEME.purple,THEME.pink,0)
+    local knob=Instance.new("Frame",track); knob.Size=UDim2.new(0,16,0,16); knob.Position=UDim2.new(1,-8,.5,-8); knob.BackgroundColor3=THEME.purpleHi; knob.BorderSizePixel=0; corner(knob,8); stroke(knob,Color3.new(1,1,1),1,.45)
+    local hit=Instance.new("TextButton",speedCard); hit.Size=UDim2.new(1,-20,0,36); hit.Position=UDim2.new(0,10,0,39); hit.BackgroundTransparency=1; hit.Text=""; hit.ZIndex=6
+    local speedHint=label(speedCard,"50  •  balanced movement  •  230",UDim2.new(1,-24,0,16),UDim2.new(0,12,0,76),9,THEME.muted,false,Enum.TextXAlignment.Center)
+    local dragging=false
+    local function updateSpeed(input)
+        if not licenseState.active then return end
+        local ratio=math.clamp((input.Position.X-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
+        local speed=math.floor(50+ratio*180)
+        env.TweenSpeed=speed; speedValue.Text=tostring(speed); fill.Size=UDim2.new(ratio,0,1,0); knob.Position=UDim2.new(ratio,-8,.5,-8)
+        local state=loadRuntimeState(); state.speed=speed; state.hops=hopCount; state.fruits=fruitCount; saveRuntimeState(state)
+    end
+    hit.InputBegan:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragging=true;updateSpeed(input) end end)
+    hit.InputEnded:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragging=false end end)
+    UserInputService.InputChanged:Connect(function(input) if dragging and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then updateSpeed(input) end end)
+    local settingsInfo=card(settingsPage,UDim2.new(1,0,0,98),UDim2.new(0,0,0,116))
+    label(settingsInfo,"SERVER QUEUE",UDim2.new(1,-20,0,20),UDim2.new(0,12,0,10),11,THEME.text,true)
+    local queueInfo=label(settingsInfo,"200 servers • 40 min cooldown",UDim2.new(1,-20,0,18),UDim2.new(0,12,0,35),9,THEME.muted,false)
+    local teamInfo=label(settingsInfo,"Preferred team: Pirates",UDim2.new(1,-20,0,18),UDim2.new(0,12,0,59),9,THEME.muted,false)
+    
+    -- Dragging
+    local draggingWindow=false; local dragStart=nil; local startPos=nil
+    local dragArea=top
+    dragArea.InputBegan:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then draggingWindow=true; dragStart=input.Position; startPos=main.Position end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if draggingWindow and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
+            local d=input.Position-dragStart; main.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then draggingWindow=false end end)
+
+    local function setPrimeHubMinimized(minimized)
+        main.Visible = not minimized
+        miniLauncher.Visible = minimized
+    end
+    minimizeBtn.MouseButton1Click:Connect(function() setPrimeHubMinimized(true) end)
+    closeBtn.MouseButton1Click:Connect(function() gui.Enabled=false end)
+
+    -- The minimized launcher can be dragged independently around the screen.
+    local draggingMini=false; local miniDragStart=nil; local miniStartPos=nil; local miniMoved=false
+    miniLauncher.InputBegan:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            draggingMini=true; miniMoved=false; miniDragStart=input.Position; miniStartPos=miniLauncher.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if draggingMini and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
+            local d=input.Position-miniDragStart
+            if math.abs(d.X)+math.abs(d.Y) > 5 then miniMoved=true end
+            miniLauncher.Position=UDim2.new(miniStartPos.X.Scale,miniStartPos.X.Offset+d.X,miniStartPos.Y.Scale,miniStartPos.Y.Offset+d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if draggingMini and (input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch) then
+            draggingMini=false
+            if not miniMoved then setPrimeHubMinimized(false) end
+        end
+    end)
+    
+    local workersStarted=false
+    local function startWorkersIfLicensed()
+        if workersStarted or not licenseState.active then return false end
+        workersStarted=true
+        env.PrimeHubLicenseValid=true
+        startWorkers()
+        if env.PrimeHubLicenseRequired then
+            task.spawn(licenseRenewWorker)
+        end
+        AddLog("[PrimeHub] Runtime unlocked.",THEME.good)
+        return true
+    end
+    
+    local lastLicenseUiActive = false
+    local function refreshLicenseUI()
+        local on=licenseState.active
+        local becameActive = on and not lastLicenseUiActive
+        licenseStatus.Text=on and ("ACTIVE  "..tostring(licenseState.keyHint or "")) or tostring(licenseState.status or "LOCKED")
+        licenseStatus.TextColor3=on and THEME.good or THEME.bad
+        licenseMessage.Text=tostring(licenseState.message or "")
+        licenseDot.BackgroundColor3=on and THEME.good or THEME.bad
+        licenseMini.Text=on and "LICENSE ACTIVE" or "LICENSE LOCKED"
+        licenseMini.TextColor3=on and THEME.good or THEME.bad
+        activeBadgeText.Text=on and "ACTIVE" or "LOCKED"
+        activeBadgeText.TextColor3=on and THEME.good or THEME.bad
+        if licenseState.installationId then licenseDevice.Text="Device: "..string.sub(tostring(licenseState.installationId),1,28) end
+        local licenseExp=tonumber(licenseState.licenseExpiresAt) or 0
+        if on then
+            if licenseExp>0 then
+                local remaining=math.max(0,licenseExp-os.time())
+                local days=math.floor(remaining/86400)
+                local hours=math.floor((remaining%86400)/3600)
+                local minutes=math.floor((remaining%3600)/60)
+                licenseExpiry.Text="Expires: "..os.date("%d %b %Y",licenseExp)
+                if days>0 then
+                    licenseRemaining.Text=string.format("Time left: %dd %dh",days,hours)
+                elseif hours>0 then
+                    licenseRemaining.Text=string.format("Time left: %dh %dm",hours,minutes)
+                else
+                    licenseRemaining.Text=string.format("Time left: %dm",minutes)
+                end
+            else
+                licenseExpiry.Text="License: FOREVER"
+                licenseRemaining.Text="Time left: Unlimited"
+            end
+        else
+            licenseExpiry.Text="License: --"
+            licenseRemaining.Text="Time left: --"
+        end
+        if on then
+            statusLabel.Text="READY"; statusLabel.TextColor3=THEME.purpleHi; subStatus.Text="Server: "..shortJobId().."  •  licensed"
+            startWorkersIfLicensed()
+
