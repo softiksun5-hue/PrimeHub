@@ -1,0 +1,264 @@
+            end
+        end
+    end
+    return result
+end
+
+local function snapshotHeldFruitTools()
+    -- Snapshot ALL Tools, not only recognized fruits. Some game revisions rename/replace
+    -- a picked fruit before its fruit markers/attributes replicate to the client.
+    local seen = {}
+    for _, tool in ipairs(listHeldToolsRaw()) do seen[tool] = true end
+    return seen
+end
+
+local function normalizeFruitStorageIdFromName(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local meta = FruitMetadata[name]
+    if meta and type(meta.id) == "string" and meta.id ~= "" then
+        return meta.id
+    end
+    local base = name:gsub(" Fruit$", "")
+    if base ~= "" and not string.find(base, "-", 1, true) then
+        return base .. "-" .. base
+    end
+    return nil
+end
+
+local function toolMatchesFruitIdentity(item, preferredName, expectedOriginal)
+    if not item or not item:IsA("Tool") then return false end
+
+    local identityKnown = (type(expectedOriginal) == "string" and expectedOriginal ~= "")
+        or (type(preferredName) == "string" and preferredName ~= "")
+    if not identityKnown and isHeldFruitTool(item) then
+        -- A generic server-spawn has no identity until pickup. The pre-pickup snapshot
+        -- guarantees this Tool is newly created, so accepting it is safe.
+        return true
+    end
+
+    local original = scanOriginalName(item)
+    if expectedOriginal and original == expectedOriginal then
+        return true
+    end
+
+    if preferredName and tostring(item.Name) == tostring(preferredName) then
+        return true
+    end
+
+    local preferredId = normalizeFruitStorageIdFromName(preferredName)
+    if preferredId and original == preferredId then
+        return true
+    end
+
+    return false
+end
+
+local function findPickedUpTool(excludeSet, preferredName, expectedOriginal)
+    local identityKnown = (type(expectedOriginal) == "string" and expectedOriginal ~= "")
+        or (type(preferredName) == "string" and preferredName ~= "")
+
+    local fallback = nil
+    for _, item in ipairs(listHeldToolsRaw()) do
+        if not excludeSet or not excludeSet[item] then
+            if toolMatchesFruitIdentity(item, preferredName, expectedOriginal) then
+                return item
+            end
+
+            -- Only allow a generic fallback when the dropped fruit itself had no
+            -- usable identity. Never let an unrelated inventory fruit (for example
+            -- a delayed Kitsune restore after team selection) masquerade as the pickup.
+            if not identityKnown and isHeldFruitTool(item) then
+                fallback = fallback or item
+            end
+        end
+    end
+
+    return fallback
+end
+
+local function findFruitTool(excludeSet, preferredName)
+    local fallback = nil
+    for _, item in ipairs(listHeldFruitTools()) do
+        if not excludeSet or not excludeSet[item] then
+            if preferredName and item.Name == preferredName then
+                return item
+            end
+            fallback = fallback or item
+        end
+    end
+    return fallback
+end
+
+local function getPlayerCharacter()
+    local character = LocalPlayer.Character
+    if character then return character end
+
+    -- Blox Fruits can create the model in Workspace.Characters a fraction earlier
+    -- than LocalPlayer.Character is assigned after team selection.
+    local characters = workspace:FindFirstChild("Characters")
+    if characters then
+        return characters:FindFirstChild(LocalPlayer.Name)
+    end
+    return nil
+end
+
+local function getPlayerRoot()
+    local character = getPlayerCharacter()
+    if not character then return nil end
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local teamSelectionBusy = false
+local lastTeamAttempt = 0
+
+local function currentTeamName()
+    local team = LocalPlayer.Team
+    if team then
+        local ok, name = pcall(function() return team.Name end)
+        if ok and type(name) == "string" and name ~= "" then return name end
+        return tostring(team)
+    end
+    return nil
+end
+
+local function waitForTeamCharacter(timeout)
+    local deadline = tick() + math.max(1, tonumber(timeout) or 10)
+    repeat
+        if not runtimeActive() then return false, "runtime_stopped" end
+        local teamName = currentTeamName()
+        local character = getPlayerCharacter()
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if teamName and root and humanoid and humanoid.Health > 0 then
+            return true, root
+        end
+        task.wait(0.2)
+    until tick() >= deadline
+    return false, "timeout"
+end
+
+local function tryChooseTeamViaGui(preferred)
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then
+        teamDebug("GUI fallback unavailable: PlayerGui not found")
+        return false
+    end
+
+    local needle = string.lower(tostring(preferred or "Pirates"))
+    local candidates = {}
+    for _, obj in ipairs(playerGui:GetDescendants()) do
+        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+            local text = ""
+            pcall(function() text = tostring(obj.Text or "") end)
+            local haystack = string.lower(tostring(obj:GetFullName()) .. " " .. text)
+            if string.find(haystack, needle, 1, true) then
+                candidates[#candidates + 1] = obj
+            end
+        end
+    end
+
+    teamDebug(string.format("GUI fallback found %d candidate button(s) for %s", #candidates, tostring(preferred)))
+    for _, button in ipairs(candidates) do
+        local fired = false
+        if type(firesignal) == "function" then
+            local okActivated = pcall(function() firesignal(button.Activated) end)
+            local okClick = pcall(function() firesignal(button.MouseButton1Click) end)
+            fired = okActivated or okClick
+        end
+
+        if type(getconnections) == "function" then
+            local signals = {}
+            pcall(function() signals[#signals + 1] = button.Activated end)
+            pcall(function() signals[#signals + 1] = button.MouseButton1Click end)
+            for _, signal in ipairs(signals) do
+                if signal then
+                    local okConnections, connections = pcall(getconnections, signal)
+                    if okConnections and type(connections) == "table" then
+                        for _, connection in ipairs(connections) do
+                            if type(connection) == "table" or type(connection) == "userdata" then
+                                local fn = nil
+                                pcall(function() fn = connection.Function end)
+                                if type(fn) == "function" then
+                                    pcall(fn)
+                                    fired = true
+                                else
+                                    local fire = nil
+                                    pcall(function() fire = connection.Fire end)
+                                    if type(fire) == "function" then
+                                        pcall(function() fire(connection) end)
+                                        fired = true
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        if fired then
+            teamDebug("GUI fallback fired button: " .. tostring(button:GetFullName()))
+            return true
+        end
+    end
+    return false
+end
+
+local function ensureTeamReady(reason, forceTeam)
+    local existingRoot = getPlayerRoot()
+    local existingTeam = currentTeamName()
+    if existingTeam and existingRoot then
+        return true, existingRoot
+    end
+
+    if not env.AutoTeam and not forceTeam then
+        teamDebug("AutoTeam disabled; team=" .. tostring(existingTeam) .. " root=" .. tostring(existingRoot))
+        return false, "auto_team_disabled"
+    end
+
+    if teamSelectionBusy then
+        teamDebug("Team selection already in progress; waiting...")
+        return waitForTeamCharacter(env.TeamReadyTimeout)
+    end
+
+    local now = tick()
+    if now - lastTeamAttempt < math.max(0.1, tonumber(env.TeamRetryDelay) or 0.75) then
+        task.wait(math.max(0.1, tonumber(env.TeamRetryDelay) or 0.75) - (now - lastTeamAttempt))
+    end
+
+    teamSelectionBusy = true
+    lastTeamAttempt = tick()
+
+    local preferred = forceTeam or env.PreferredTeam or "Pirates"
+    if preferred ~= "Marines" then preferred = "Pirates" end
+    env.PreferredTeam = preferred
+
+    teamDebug(string.format(
+        "Team required (%s). current=%s preferred=%s root=%s",
+        tostring(reason or "unknown"), tostring(existingTeam), tostring(preferred), tostring(existingRoot)
+    ))
+
+    local remoteOk, remoteResult = pcall(function()
+        return CommF_:InvokeServer("SetTeam", preferred)
+    end)
+    teamDebug(string.format("SetTeam remote ok=%s result=%s", tostring(remoteOk), tostring(remoteResult)))
+
+    -- The server normally assigns Team + Character shortly after SetTeam.
+    local ready, rootOrReason = waitForTeamCharacter(math.min(4, tonumber(env.TeamReadyTimeout) or 10))
+    if not ready and runtimeActive() and currentTeamName() == nil then
+        teamDebug("Remote did not produce a team yet; trying ChooseTeam GUI fallback")
+        tryChooseTeamViaGui(preferred)
+        ready, rootOrReason = waitForTeamCharacter(env.TeamReadyTimeout)
+    elseif not ready then
+        -- Team exists but the character/root is still spawning; give it the remaining window.
+        ready, rootOrReason = waitForTeamCharacter(env.TeamReadyTimeout)
+    end
+
+    teamSelectionBusy = false
+
+    if ready then
+        teamDebug(string.format("TEAM READY: %s root=%s", tostring(currentTeamName()), tostring(rootOrReason)))
+        AddLog("Team ready: " .. tostring(currentTeamName()), Color3.fromRGB(0, 255, 100))
+        return true, rootOrReason
+    end
+
