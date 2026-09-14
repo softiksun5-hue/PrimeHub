@@ -1,0 +1,276 @@
+if env.SniperAllFruits == nil then env.SniperAllFruits = true end
+
+-- Automatically join a team only when a target fruit is present.
+env.AutoTeam = env.AutoTeam ~= false
+env.PreferredTeam = (env.PreferredTeam == "Marines" and "Marines") or "Pirates"
+env.TeamReadyTimeout = tonumber(env.TeamReadyTimeout) or 10
+env.TeamRetryDelay = tonumber(env.TeamRetryDelay) or 0.75
+
+local TargetFruits = {
+    dough = "Dough Fruit",
+    quake = "Quake Fruit",
+    rumble = "Rumble Fruit",
+    drag = "Dragon Fruit",
+    light = "Light Fruit",
+    ice = "Ice Fruit",
+    magu = "Magma Fruit",
+    dark = "Dark Fruit",
+    kits = "Kitsune Fruit",
+    port = "Portal Fruit",
+    budd = "Buddha Fruit",
+    leop = "Leopard Fruit",
+}
+
+local TargetFruitNames = {}
+for _, fruitName in pairs(TargetFruits) do
+    TargetFruitNames[fruitName] = true
+end
+
+local FruitMetadata = {
+    ["Barrier Fruit"] = {id="Barrier-Barrier", rarity="Rare", color=3447003},
+    ["Blizzard Fruit"] = {id="Blizzard-Blizzard", rarity="Legendary", color=16711935},
+    ["Bomb Fruit"] = {id="Bomb-Bomb", rarity="Common", color=8421504},
+    ["Buddha Fruit"] = {id="Buddha-Buddha", rarity="Legendary", color=16711935},
+    ["Chop Fruit"] = {id="Chop-Chop", rarity="Common", color=8421504},
+    ["Control Fruit"] = {id="Control-Control", rarity="Mythical", color=16711680},
+    ["Dark Fruit"] = {id="Dark-Dark", rarity="Uncommon", color=3447003},
+    ["Diamond Fruit"] = {id="Diamond-Diamond", rarity="Rare", color=3447003},
+    ["Dough Fruit"] = {id="Dough-Dough", rarity="Mythical", color=16711680},
+    ["Dragon Fruit"] = {id="Dragon-Dragon", rarity="Mythical", color=16711680},
+    ["Falcon Fruit"] = {id="Falcon-Falcon", rarity="Uncommon", color=3447003},
+    ["Flame Fruit"] = {id="Flame-Flame", rarity="Uncommon", color=3447003},
+    ["Gas Fruit"] = {id="Gas-Gas", rarity="Legendary", color=16711935},
+    ["Ghost Fruit"] = {id="Ghost-Ghost", rarity="Rare", color=3447003},
+    ["Gravity Fruit"] = {id="Gravity-Gravity", rarity="Mythical", color=16711680},
+    ["Ice Fruit"] = {id="Ice-Ice", rarity="Uncommon", color=3447003},
+    ["Kitsune Fruit"] = {id="Kitsune-Kitsune", rarity="Mythical", color=16711680},
+    ["Leopard Fruit"] = {id="Leopard-Leopard", rarity="Mythical", color=16711680},
+    ["Light Fruit"] = {id="Light-Light", rarity="Rare", color=3447003},
+    ["Love Fruit"] = {id="Love-Love", rarity="Legendary", color=16711935},
+    ["Magma Fruit"] = {id="Magma-Magma", rarity="Rare", color=3447003},
+    ["Mammoth Fruit"] = {id="Mammoth-Mammoth", rarity="Mythical", color=16711680},
+    ["Pain Fruit"] = {id="Pain-Pain", rarity="Legendary", color=16711935},
+    ["Phoenix Fruit"] = {id="Phoenix-Phoenix", rarity="Legendary", color=16711935},
+    ["Portal Fruit"] = {id="Portal-Portal", rarity="Legendary", color=16711935},
+    ["Quake Fruit"] = {id="Quake-Quake", rarity="Legendary", color=16711935},
+    ["Rocket Fruit"] = {id="Rocket-Rocket", rarity="Common", color=8421504},
+    ["Rubber Fruit"] = {id="Rubber-Rubber", rarity="Rare", color=3447003},
+    ["Rumble Fruit"] = {id="Rumble-Rumble", rarity="Legendary", color=16711935},
+    ["Sand Fruit"] = {id="Sand-Sand", rarity="Uncommon", color=3447003},
+    ["Shadow Fruit"] = {id="Shadow-Shadow", rarity="Mythical", color=16711680},
+    ["Smoke Fruit"] = {id="Smoke-Smoke", rarity="Common", color=8421504},
+    ["Sound Fruit"] = {id="Sound-Sound", rarity="Legendary", color=16711935},
+    ["Spider Fruit"] = {id="Spider-Spider", rarity="Legendary", color=16711935},
+    ["Spike Fruit"] = {id="Spike-Spike", rarity="Common", color=8421504},
+    ["Spin Fruit"] = {id="Spin-Spin", rarity="Common", color=8421504},
+    ["Spirit Fruit"] = {id="Spirit-Spirit", rarity="Mythical", color=16711680},
+    ["Spring Fruit"] = {id="Spring-Spring", rarity="Common", color=8421504},
+    ["Striker Fruit"] = {id="Striker-Striker", rarity="Legendary", color=16711935},
+    ["T-Rex Fruit"] = {id="T-Rex-T-Rex", rarity="Mythical", color=16711680},
+    ["Venom Fruit"] = {id="Venom-Venom", rarity="Mythical", color=16711680},
+    ["Yeti Fruit"] = {id="Yeti-Yeti", rarity="Rare", color=3447003},
+}
+
+local FruitStorageIdToName = {}
+for fruitName, metadata in pairs(FruitMetadata) do
+    if type(metadata) == "table" and type(metadata.id) == "string" and metadata.id ~= "" then
+        FruitStorageIdToName[metadata.id] = fruitName
+    end
+end
+
+local SafeZones = {
+    ["Sea 1"] = {name="Starter Pirate (Safe Zone)", pos=Vector3.new(-2717, 25, 1968)},
+    ["Sea 2"] = {name="Cafe (Safe Zone)", pos=Vector3.new(-380, 75, 297)},
+    ["Sea 3"] = {name="Castle on the Sea (Safe Zone)", pos=Vector3.new(-5036, 320, -3179)},
+}
+
+local SEA_PLACE_IDS = {
+    ["Sea 1"] = {
+        [2753915549] = true,
+        [85211729168715] = true, -- Update 30 / Sea 1 rework place
+    },
+    ["Sea 2"] = {
+        [4442272183] = true,
+        [79091703265657] = true,
+    },
+    ["Sea 3"] = {
+        [7449423635] = true,
+        [7449925010] = true, -- retained legacy/alternate mapping
+        [100117331123089] = true,
+    },
+}
+
+local function mapHasAny(names)
+    local map = workspace:FindFirstChild("Map")
+    if not map then return false end
+    for _, name in ipairs(names) do
+        if map:FindFirstChild(name, true) then return true end
+    end
+    return false
+end
+
+local function getCurrentSea()
+    local placeId = tonumber(game.PlaceId)
+    for sea, ids in pairs(SEA_PLACE_IDS) do
+        if ids[placeId] then return sea end
+    end
+
+    -- Fallback for future Blox Fruits updates that introduce another PlaceId.
+    -- Use several unique map markers instead of guessing Sea 3.
+    if mapHasAny({"Castle on the Sea", "Castle On The Sea", "Hydra Island", "Hydra", "Floating Turtle", "Turtle"}) then
+        return "Sea 3"
+    end
+    if mapHasAny({"Cafe", "Kingdom of Rose", "Dressrosa", "Green Zone", "Cursed Ship"}) then
+        return "Sea 2"
+    end
+    if mapHasAny({"Middle Town", "Jungle", "Marine Fortress", "MarineFord", "Fountain City", "Skylands"}) then
+        return "Sea 1"
+    end
+
+    return "Unknown"
+end
+
+local function getSafeZone()
+    return SafeZones[getCurrentSea()]
+end
+
+local logCounter = 0
+local logContainer = nil
+
+local function AddLog(message, color)
+    logCounter = logCounter + 1
+
+    -- Every PrimeHub log line is mirrored to the executor console.
+    -- This runs even before the GUI/log panel exists.
+    executorLog("INFO", message)
+
+    if typeof(color) ~= "Color3" then
+        color = Color3.fromRGB(190, 205, 225)
+    end
+
+    if not logContainer or not logContainer.Parent then
+        return
+    end
+
+    local label = Instance.new("TextLabel", logContainer)
+    label.LayoutOrder = logCounter
+    label.Size = UDim2.new(1, -4, 0, 14)
+    label.BackgroundTransparency = 1
+    label.Text = os.date("%H:%M:%S") .. " " .. tostring(message)
+    label.TextColor3 = color
+    label.Font = Enum.Font.Gotham
+    label.TextSize = 9
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextWrapped = true
+
+    task.defer(function()
+        if logContainer and logContainer.Parent then
+            logContainer.CanvasPosition = Vector2.new(0, logContainer.AbsoluteCanvasSize.Y)
+        end
+    end)
+
+    task.delay(45, function()
+        if label and label.Parent then
+            label:Destroy()
+        end
+    end)
+end
+
+env.AddLog = AddLog
+
+local DEFAULT_STATE = {
+    servers = {},
+    serverVisits = {},
+    serverBlockedUntil = {},
+    serverQueue = {},
+    serverQueueBuiltAt = 0,
+    serverQueueStrategy = "",
+    hops = 0,
+    fruits = 0,
+    speed = 230,
+}
+
+local stateBusy = false
+local hopCount = 0
+local fruitCount = 0
+local hopCountLabel = nil
+local fruitCountLabel = nil
+local statusLabel = nil
+local subStatus = nil
+
+local function cloneDefaultState()
+    return {
+        servers = {},
+        serverVisits = {},
+        serverBlockedUntil = {},
+        serverQueue = {},
+        serverQueueBuiltAt = 0,
+        serverQueueStrategy = "",
+        hops = DEFAULT_STATE.hops,
+        fruits = DEFAULT_STATE.fruits,
+        speed = DEFAULT_STATE.speed,
+    }
+end
+
+local function loadRuntimeState()
+    if stateBusy then
+        task.wait(0.3)
+    end
+
+    local state = cloneDefaultState()
+    if type(isfile) == "function" and isfile(VISITED_SERVERS_FILE) then
+        local ok, decoded = pcall(function()
+            local content = readfile(VISITED_SERVERS_FILE)
+            if not content or content == "" then
+                return nil
+            end
+            return HttpService:JSONDecode(content)
+        end)
+
+        if ok and type(decoded) == "table" then
+            state = decoded
+            state.servers = type(state.servers) == "table" and state.servers or {}
+            state.serverVisits = type(state.serverVisits) == "table" and state.serverVisits or {}
+            state.serverBlockedUntil = type(state.serverBlockedUntil) == "table" and state.serverBlockedUntil or {}
+            state.serverQueue = type(state.serverQueue) == "table" and state.serverQueue or {}
+            state.serverQueueBuiltAt = tonumber(state.serverQueueBuiltAt) or 0
+            state.serverQueueStrategy = tostring(state.serverQueueStrategy or "")
+            state.hops = tonumber(state.hops) or 0
+            state.fruits = tonumber(state.fruits) or 0
+            state.speed = tonumber(state.speed) or 230
+        end
+    end
+    return state
+end
+
+local function saveRuntimeState(state)
+    task.spawn(function()
+        stateBusy = true
+        pcall(function()
+            if type(writefile) == "function" then
+                writefile(VISITED_SERVERS_FILE, HttpService:JSONEncode(state))
+            end
+        end)
+        stateBusy = false
+    end)
+end
+
+local function saveRuntimeStateImmediate(state)
+    stateBusy = true
+    local ok = pcall(function()
+        if type(writefile) == "function" then
+            writefile(VISITED_SERVERS_FILE, HttpService:JSONEncode(state))
+        end
+    end)
+    stateBusy = false
+    return ok
+end
+
+local function updateStats(newHops, newFruits)
+    if newHops ~= nil then
+        hopCount = tonumber(newHops) or 0
+    end
+    if newFruits ~= nil then
+        fruitCount = tonumber(newFruits) or 0
+    end
+
