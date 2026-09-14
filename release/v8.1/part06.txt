@@ -1,0 +1,266 @@
+    local okTag, tagged = pcall(function()
+        return CollectionService:HasTag(instance, "WORLD_DROP")
+    end)
+    if okTag and tagged then
+        return handleReady == true
+    end
+
+    -- Conservative delayed-tag fallback: keep the exact live structure we already proved,
+    -- and only accept it as a direct Workspace child to avoid broad false positives.
+    if instance.Parent ~= workspace then return false end
+    local rawName = tostring(instance.Name or "")
+    local trimmedName = string.match(rawName, "^%s*(.-)%s*$") or rawName
+    if string.lower(trimmedName) ~= "fruit" or not handleReady then return false end
+
+    local visual = instance:FindFirstChild("Fruit")
+    local animator = instance:FindFirstChild("FruitAnimator")
+    return visual ~= nil and visual:IsA("Model") and animator ~= nil
+end
+
+local function getDroppedFruitPart(tool)
+    if not tool or not tool.Parent then return nil end
+
+    if isServerWorldFruitModel(tool) then
+        local handle = tool:FindFirstChild("Handle")
+        if handle and handle:IsA("BasePart") then return handle end
+        return nil
+    end
+
+    if not tool:IsA("Tool") then return nil end
+    local handle = tool:FindFirstChild("Handle")
+    if handle and handle:IsA("BasePart") then return handle end
+    if tool.Name == "Fruit " then
+        local mesh = tool:FindFirstChildWhichIsA("MeshPart")
+        if mesh then return mesh end
+    end
+    return nil
+end
+
+local function scanOriginalName(tool)
+    local ok, value = pcall(function() return tool:GetAttribute("OriginalName") end)
+    if ok and type(value) == "string" and value ~= "" then return value end
+    return nil
+end
+
+local function isPlayerDroppedFruit(tool)
+    if not tool or not tool:IsA("Tool") then return false end
+
+    local okUserId, droppedByUserId = pcall(function()
+        return tool:GetAttribute("DroppedByUserId")
+    end)
+    if okUserId and tonumber(droppedByUserId) and tonumber(droppedByUserId) > 0 then
+        return true
+    end
+
+    local okDroppedBy, droppedBy = pcall(function()
+        return tool:GetAttribute("DroppedBy")
+    end)
+    if okDroppedBy and droppedBy ~= nil then
+        local text = tostring(droppedBy)
+        if text ~= "" and text ~= "0" and text ~= "nil" then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function fruitNameFromTool(tool)
+    if not tool then return nil end
+    if isServerWorldFruitModel(tool) then return "Fruit " end
+    if not tool:IsA("Tool") then return nil end
+    local name = tostring(tool.Name or "")
+    if name == "Fruit " then return name end
+
+    -- PrimeHub 7.9: trust the live Tool display name when it clearly identifies a fruit.
+    -- This lets renamed/new fruits (for example Blade Fruit) work without waiting for
+    -- FruitMetadata to be updated.
+    if looksLikeFruitName(name) then return name end
+
+    local original = scanOriginalName(tool)
+    if original and FruitStorageIdToName[original] then
+        return FruitStorageIdToName[original]
+    end
+
+    -- Unknown storage ids can still provide a useful dynamic identity.
+    -- "Blade-Blade" -> "Blade Fruit". Keep this conservative: both halves must match.
+    if type(original) == "string" and original ~= "" then
+        local left, right = string.match(original, "^(.+)%-(.+)$")
+        if left and right and left == right then
+            return left .. " Fruit"
+        end
+    end
+    return nil
+end
+
+local function isInsidePlayerCharacter(instance)
+    if not instance then return false end
+
+    local characters = workspace:FindFirstChild("Characters")
+    if characters then
+        local ok, inside = pcall(function() return instance:IsDescendantOf(characters) end)
+        if ok and inside then return true end
+    end
+
+    local node = instance.Parent
+    local depth = 0
+    while node and node ~= workspace and depth < 8 do
+        if node:IsA("Model") then
+            local ok, player = pcall(function() return Players:GetPlayerFromCharacter(node) end)
+            if ok and player then return true end
+        end
+        node = node.Parent
+        depth = depth + 1
+    end
+    return false
+end
+
+local function isFruitLikeTool(tool)
+    if not tool then return false end
+    if isServerWorldFruitModel(tool) then return true end
+    if not tool:IsA("Tool") then return false end
+    local name = tostring(tool.Name or "")
+    if string.find(name, "Fruit", 1, true) then return true end
+    if scanOriginalName(tool) then return true end
+    if tool:FindFirstChild("EatRemote") then return true end
+    return false
+end
+
+local function isDroppedFruit(tool)
+    if not tool or not tool.Parent then return false end
+    if isServerWorldFruitModel(tool) then
+        return getDroppedFruitPart(tool) ~= nil
+    end
+    if not tool:IsA("Tool") then return false end
+    if isInsidePlayerCharacter(tool) then return false end
+    -- PrimeHub 7.9: accept both legacy world Tools and current WORLD_DROP Models.
+    if not getDroppedFruitPart(tool) then return false end
+
+    -- Generic live fruit container used by some game revisions.
+    if tool.Name == "Fruit " then return true end
+
+    if env.SniperAllFruits then
+        -- PrimeHub 7.9: do NOT gate collection on FruitMetadata or drop-origin attributes.
+        -- A world Tool only needs to look like a fruit by its live markers/name/OriginalName.
+        return isFruitLikeTool(tool)
+    end
+
+    local resolved = fruitNameFromTool(tool)
+    if not resolved then return false end
+    return TargetFruitNames[resolved] == true
+end
+
+-- R9 WORLD_DROP confirmation gate.
+-- In the R3 logs some startup-tagged roots remained in Workspace while their Handle
+-- vanished 1-4 seconds later. Those are treated as pending until they prove stable.
+local worldDropCandidateState = setmetatable({}, {__mode="k"})
+
+local function worldDropRawReady(instance)
+    return instance ~= nil
+        and instance.Parent ~= nil
+        and instance:IsA("Model")
+        and isServerWorldFruitModel(instance)
+        and isDroppedFruit(instance)
+end
+
+local function worldDropConfirmStatus(instance)
+    local now = tick()
+    local rawReady = worldDropRawReady(instance)
+    local state = worldDropCandidateState[instance]
+
+    if not rawReady then
+        if not state then
+            return false, false, 0, "invalid"
+        end
+
+        local recoveryGrace = (state.origin == "startup")
+            and (tonumber(env.WorldDropRecoveryGrace) or 3.0)
+            or math.min(1.0, tonumber(env.WorldDropRecoveryGrace) or 3.0)
+
+        if not state.lostAt then
+            state.lostAt = now
+            state.lossCount = (tonumber(state.lossCount) or 0) + 1
+            executorLog("EVENT", string.format(
+                "WORLD_DROP structure LOST age=%.2fs origin=%s recoveryGrace=%.2fs lossCount=%d",
+                math.max(0, now - state.firstReady), tostring(state.origin), recoveryGrace, state.lossCount
+            ))
+        end
+
+        local lostFor = math.max(0, now - state.lostAt)
+        local remaining = math.max(0, recoveryGrace - lostFor)
+        if remaining > 0 then
+            return false, true, remaining, "recovering"
+        end
+
+        if not state.invalidLogged then
+            state.invalidLogged = true
+            executorLog("EVENT", string.format(
+                "WORLD_DROP rejected after recovery grace age=%.2fs lostFor=%.2fs grace=%.2fs origin=%s recovered=%s",
+                math.max(0, now - state.firstReady), lostFor, recoveryGrace,
+                tostring(state.origin), tostring((tonumber(state.recoveryCount) or 0) > 0)
+            ))
+        end
+        worldDropCandidateState[instance] = nil
+        return false, false, 0, "invalid"
+    end
+
+    -- The exact same tagged Model regained a valid pickup structure.
+    if state and state.lostAt then
+        local gap = math.max(0, now - state.lostAt)
+        state.lostAt = nil
+        state.recoveryCount = (tonumber(state.recoveryCount) or 0) + 1
+        state.firstReady = now -- require a fresh full stability window after recovery
+        state.confirmed = false
+        state.invalidLogged = false
+        executorLog("EVENT", string.format(
+            "WORLD_DROP RECOVERED structure after %.2fs origin=%s recoveryCount=%d; restarting %.2fs stability confirmation",
+            gap, tostring(state.origin), state.recoveryCount, state.required
+        ))
+    end
+
+    if not state then
+        local bootAge = math.max(0, now - PRIMEHUB_BOOT_TICK)
+        local startup = bootAge <= (tonumber(env.WorldDropStartupWindow) or 6.0)
+        local required = startup
+            and (tonumber(env.WorldDropStartupConfirm) or 4.0)
+            or (tonumber(env.WorldDropRuntimeConfirm) or 0.65)
+        state = {
+            firstReady = now,
+            required = required,
+            origin = startup and "startup" or "runtime",
+            confirmed = false,
+            invalidLogged = false,
+            lostAt = nil,
+            lossCount = 0,
+            recoveryCount = 0,
+        }
+        worldDropCandidateState[instance] = state
+        local path = tostring(instance)
+        pcall(function() path = instance:GetFullName() end)
+        executorLog("EVENT", string.format(
+            "WORLD_DROP pending confirmation origin=%s required=%.2fs path=%s",
+            state.origin, state.required, path
+        ))
+    end
+
+    local age = math.max(0, now - state.firstReady)
+    local remaining = math.max(0, state.required - age)
+    if age >= state.required then
+        if not state.confirmed then
+            state.confirmed = true
+            executorLog("EVENT", string.format(
+                "WORLD_DROP CONFIRMED origin=%s stableFor=%.2fs required=%.2fs recoveries=%d",
+                tostring(state.origin), age, state.required, tonumber(state.recoveryCount) or 0
+            ))
+        end
+        return true, false, 0, state.origin
+    end
+
+    return false, true, remaining, state.origin
+end
+
+-- 8.1 TEST: do not retry the exact same uncollectable WORLD_DROP forever.
+local failedPickupTargets = setmetatable({}, {__mode="k"})
+
+local function pickupTargetBlacklisted(instance)
+    local untilTs = tonumber(failedPickupTargets[instance]) or 0
