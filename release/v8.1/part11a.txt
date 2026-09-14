@@ -1,0 +1,213 @@
+    -- PrimeHub 7.9: take the lock BEFORE waiting for team/character setup. Stage 18
+    -- could let deepScan + periodicSniper enter processFruit simultaneously.
+    processingFruit = true
+    activeWorldDropTarget = fruit
+
+    local ok, result = pcall(function()
+        local preferredName = fruitNameFromTool(fruit)
+        if preferredName == "Fruit " then preferredName = nil end
+        local expectedOriginal = scanOriginalName(fruit) or normalizeFruitStorageIdFromName(preferredName)
+
+        executorLog("PICKUP", string.format(
+            "target ptr=%s name=%q OriginalName=%q preferred=%q",
+            tostring(fruit), tostring(fruit.Name), tostring(expectedOriginal), tostring(preferredName)
+        ))
+
+        local teamReady = ensureTeamReady("processFruit: " .. tostring(fruit.Name))
+        if not teamReady then
+            AddLog("Fruit detected but character is not ready yet: " .. tostring(fruit.Name), Color3.fromRGB(255, 180, 80))
+            return false
+        end
+
+        -- Snapshot after team selection has completed so delayed inventory restoration
+        -- is already present and cannot be mistaken for this pickup.
+        local beforePickup = snapshotHeldFruitTools()
+        local tool = nil
+
+        local pickupOffset = isServerWorldFruitModel(fruit) and 2 or (tonumber(env.FlyOffset) or 5)
+        local flightSpeed = math.max(50, tonumber(env.TweenSpeed) or 230)
+
+        local firstHandle = getDroppedFruitPart(fruit)
+        local firstRoot = getPlayerRoot()
+        if firstHandle and firstRoot then
+            local firstTarget = firstHandle.Position + Vector3.new(0, pickupOffset, 0)
+            local firstDistance = (firstRoot.Position - firstTarget).Magnitude
+
+            if firstDistance > 8 then
+                local expectedTravel = firstDistance / flightSpeed
+                local flightTimeout = math.max(
+                    20,
+                    expectedTravel * (tonumber(env.FlightTimeoutMultiplier) or 1.35)
+                        + (tonumber(env.FlightTimeoutBuffer) or 20)
+                )
+                executorLog("PICKUP", string.format(
+                    "FLIGHT start distance=%.0f speed=%.0f expected=%.1fs timeout=%.1fs target=%s",
+                    firstDistance, flightSpeed, expectedTravel, flightTimeout, tostring(fruit.Name)
+                ))
+
+                env.ViajandoAteAFruta = true
+                local flightDeadline = tick() + flightTimeout
+                local lastRemaining = firstDistance
+                local bestRemaining = firstDistance
+                local lastProgressAt = tick()
+                local flightStalled = false
+                local progressEpsilon = tonumber(env.FlightProgressEpsilon) or 75
+                local noProgressTimeout = tonumber(env.FlightNoProgressTimeout) or 15
+                local targetLeftWorkspace = false
+                local targetStructureLost = false
+                while runtimeActive() and tick() < flightDeadline do
+                    local inWorkspace = false
+                    pcall(function() inWorkspace = fruit:IsDescendantOf(workspace) end)
+                    if not fruit.Parent or not inWorkspace then
+                        targetLeftWorkspace = true
+                        break
+                    end
+                    if not isServerWorldFruitModel(fruit) then
+                        targetStructureLost = true
+                        break
+                    end
+
+                    local handle = getDroppedFruitPart(fruit)
+                    local root = getPlayerRoot()
+                    local character = LocalPlayer.Character
+                    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+                    if not handle or not root or not humanoid or humanoid.Health <= 0 then break end
+
+                    local targetPosition = handle.Position + Vector3.new(0, pickupOffset, 0)
+                    local remaining = (root.Position - targetPosition).Magnitude
+                    lastRemaining = remaining
+                    if remaining <= 8 then break end
+
+                    if remaining <= (bestRemaining - progressEpsilon) then
+                        bestRemaining = remaining
+                        lastProgressAt = tick()
+                    elseif (tick() - lastProgressAt) >= noProgressTimeout then
+                        flightStalled = true
+                        break
+                    end
+
+                    if not applyFlight(targetPosition, flightSpeed) then break end
+                    task.wait(0.1)
+                end
+                cleanupFlight()
+
+                if (targetLeftWorkspace or targetStructureLost) and lastRemaining > 20 then
+                    executorLog("EVENT", string.format(
+                        "WORLD_DROP became unavailable during flight remaining=%.0f leftWorkspace=%s structureLost=%s; aborting immediately",
+                        lastRemaining, tostring(targetLeftWorkspace), tostring(targetStructureLost)
+                    ))
+                    return false
+                end
+
+                if flightStalled and lastRemaining > 20 then
+                    executorLog("PICKUP", string.format(
+                        "FLIGHT watchdog: no meaningful progress for %.1fs remaining=%.0f; aborting target",
+                        noProgressTimeout, lastRemaining
+                    ))
+                    return false
+                end
+
+                local endRoot = getPlayerRoot()
+                local endHandle = getDroppedFruitPart(fruit)
+                if endRoot and endHandle then
+                    local remaining = (endRoot.Position - (endHandle.Position + Vector3.new(0, pickupOffset, 0))).Magnitude
+                    executorLog("PICKUP", string.format("FLIGHT end remaining=%.1f target=%s", remaining, tostring(fruit.Name)))
+                end
+            end
+        end
+
+        local deadline = tick() + 5.0
+
+        while not tool and runtimeActive() and tick() < deadline do
+            if not fruit.Parent then
+                tool = findPickedUpTool(beforePickup, preferredName, expectedOriginal)
+                if tool then break end
+            end
+
+            local handle = getDroppedFruitPart(fruit)
+            local root = getPlayerRoot()
+            if handle and root then
+                local targetPosition = handle.Position + Vector3.new(0, pickupOffset, 0)
+                local distance = (root.Position - targetPosition).Magnitude
+
+                if distance <= 8 then
+                    root.CFrame = handle.CFrame + Vector3.new(0, pickupOffset, 0)
+                    root.Velocity = Vector3.zero
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.RotVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                else
+                    applyFlight(targetPosition, flightSpeed)
+                end
+            elseif not root then
+                AddLog("Flight/pickup failed: root unavailable.", Color3.fromRGB(255, 100, 100))
+                break
+            end
+
+            task.wait(0.1)
+            tool = findPickedUpTool(beforePickup, preferredName, expectedOriginal)
+        end
+        cleanupFlight()
+
+        if not tool then
+            executorLog("PICKUP", string.format(
+                "strict pickup failed for name=%q OriginalName=%q; unrelated inventory Tools ignored",
+                tostring(preferredName), tostring(expectedOriginal)
+            ))
+            failedPickupTargets[fruit] = tick() + 30
+            AddLog("Pickup timed out: " .. tostring(fruit.Name) .. " — blacklisting target and hopping.",
+                Color3.fromRGB(255, 180, 80))
+            executorLog("PICKUP", "failed WORLD_DROP blacklisted for 30s; AutoHop may leave current server")
+            return false
+        end
+
+        if not toolMatchesFruitIdentity(tool, preferredName, expectedOriginal) then
+            executorLog("WARN", "Rejected mismatched pickup Tool: " .. tostring(tool.Name))
+            AddLog("Pickup identity mismatch; ignoring " .. tostring(tool.Name), Color3.fromRGB(255, 180, 80))
+            return false
+        end
+
+        updateStats(nil, fruitCount + 1)
+        AddLog("Picked up: " .. tostring(tool.Name), Color3.fromRGB(0, 255, 100))
+        executorLog("STORE", "pickup detected ptr=" .. tostring(tool) .. " name=" .. tostring(tool.Name)
+            .. " parent=" .. toolParentName(tool) .. " expectedOriginal=" .. tostring(expectedOriginal))
+        task.wait(tonumber(env.StorePostPickupDelay) or 0.35)
+
+        local refreshedTool, replacedAfterPickup = reacquireHeldFruitTool(
+            tool, preferredName, beforePickup, env.StoreReacquireTimeout, expectedOriginal
+        )
+        if refreshedTool then
+            if replacedAfterPickup then
+                executorLog("STORE", "post-pickup Tool replacement detected: old=" .. tostring(tool)
+                    .. " new=" .. tostring(refreshedTool))
+            end
+            tool = refreshedTool
+        else
+            dumpHeldFruitTools("post-pickup reacquire failed")
+            AddLog("Could not reacquire the picked fruit; continuing hop cycle.", Color3.fromRGB(255, 180, 80))
+            return false
+        end
+
+        local stored, storeReason, storeDetail = storeFruit(
+            tool, preferredName, beforePickup, expectedOriginal
+        )
+        task.wait(0.5)
+
+        if stored then
+            AddLog("Stored: " .. tostring(tool.Name), Color3.fromRGB(0, 255, 100))
+            env.HoldingHighTierFruit = false
+            return true
+        end
+
+        local metadata = FruitMetadata[preferredName or tool.Name] or FruitMetadata[tool.Name]
+
+        if storeReason == "full" then
+            return handleHighTierFruit(tool, metadata)
+        end
+
+        AddLog(
+            "Could not confirm storage (" .. tostring(storeReason) .. "): " .. tostring(storeDetail),
+            Color3.fromRGB(255, 100, 100)
+        )
+
+        -- PrimeHub 7.9: an unconfirmed remote response must not permanently kill the
