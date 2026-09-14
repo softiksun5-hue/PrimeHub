@@ -1,0 +1,277 @@
+    local state = loadRuntimeState()
+    state.hops = hopCount
+    state.fruits = fruitCount
+    state.speed = tonumber(env.TweenSpeed) or 230
+    saveRuntimeState(state)
+
+    if hopCountLabel then hopCountLabel.Text = tostring(hopCount) end
+    if fruitCountLabel then fruitCountLabel.Text = tostring(fruitCount) end
+end
+
+local function initializeCountersFromState()
+    local state = loadRuntimeState()
+    hopCount = tonumber(state.hops) or 0
+    fruitCount = tonumber(state.fruits) or 0
+    env.TweenSpeed = tonumber(state.speed) or tonumber(env.TweenSpeed) or 230
+    return state
+end
+
+local function getRequestFunction()
+    if type(syn) == "table" and type(syn.request) == "function" then
+        return syn.request
+    end
+    if type(http) == "table" and type(http.request) == "function" then
+        return http.request
+    end
+    if type(fluxus) == "table" and type(fluxus.request) == "function" then
+        return fluxus.request
+    end
+    if type(http_request) == "function" then
+        return http_request
+    end
+    if type(request) == "function" then
+        return request
+    end
+    return nil
+end
+
+local function performRequest(options)
+    local requestFn = getRequestFunction()
+    if not requestFn then return nil, "executor has no request function" end
+
+    local ok, response = pcall(requestFn, options)
+    if ok and type(response) == "table" then
+        return response
+    end
+    return nil, tostring(response)
+end
+
+local function httpGetBody(url)
+    local response = performRequest({Url=url, Method="GET"})
+    if response and (response.StatusCode == 200 or response.Status == 200 or response.status == 200) then
+        return response.Body or response.body or response.ResponseBody
+    end
+
+    local ok, body = pcall(function()
+        return game:HttpGet(url)
+    end)
+    if ok then return body end
+    return nil
+end
+
+
+-- PrimeHub 7.9 license client. This is intentionally separate from the Chrome extension
+-- Phase-4 attestation flow: the Worker exposes product-scoped /v1/hub/* endpoints.
+local licenseState = {
+    active = false,
+    status = "LOCKED",
+    message = "Enter a PrimeHub license key",
+    keyHint = nil,
+    licenseKey = nil,
+    installationId = nil,
+    leaseToken = nil,
+    leaseExpiresAt = 0,
+    licenseExpiresAt = 0,
+    maxDevices = 0,
+}
+local licenseChangedCallbacks = {}
+local licenseRenewBusy = false
+
+local function notifyLicenseChanged()
+    for _, cb in ipairs(licenseChangedCallbacks) do
+        pcall(cb, licenseState)
+    end
+end
+
+local function onLicenseChanged(cb)
+    if type(cb) == "function" then
+        licenseChangedCallbacks[#licenseChangedCallbacks + 1] = cb
+    end
+end
+
+local function decodeJsonSafe(text)
+    if type(text) ~= "string" or text == "" then return nil end
+    local ok, obj = pcall(function() return HttpService:JSONDecode(text) end)
+    if ok and type(obj) == "table" then return obj end
+    return nil
+end
+
+local function saveLicenseCache()
+    if type(writefile) ~= "function" then return false end
+    local payload = {
+        productId = PRIMEHUB_PRODUCT_ID,
+        version = PRIMEHUB_VERSION,
+        licenseKey = licenseState.licenseKey,
+        installationId = licenseState.installationId,
+        leaseToken = licenseState.leaseToken,
+        leaseExpiresAt = tonumber(licenseState.leaseExpiresAt) or 0,
+        licenseExpiresAt = tonumber(licenseState.licenseExpiresAt) or 0,
+        keyHint = licenseState.keyHint,
+        maxDevices = tonumber(licenseState.maxDevices) or 0,
+    }
+    local ok = pcall(function()
+        writefile(PRIMEHUB_LICENSE_FILE, HttpService:JSONEncode(payload))
+    end)
+    return ok
+end
+
+local function loadLicenseCache()
+    local cache = {}
+    if type(isfile) == "function" and type(readfile) == "function" and isfile(PRIMEHUB_LICENSE_FILE) then
+        local ok, raw = pcall(readfile, PRIMEHUB_LICENSE_FILE)
+        if ok then cache = decodeJsonSafe(raw) or {} end
+    end
+
+    local install = tostring(cache.installationId or "")
+    if install == "" then
+        local ok, guid = pcall(function() return HttpService:GenerateGUID(false) end)
+        install = "PH-" .. (ok and tostring(guid) or tostring(LocalPlayer.UserId) .. "-" .. tostring(os.time()))
+    end
+    licenseState.installationId = install
+    licenseState.licenseKey = type(cache.licenseKey) == "string" and cache.licenseKey or nil
+    licenseState.leaseToken = type(cache.leaseToken) == "string" and cache.leaseToken or nil
+    licenseState.leaseExpiresAt = tonumber(cache.leaseExpiresAt) or 0
+    licenseState.licenseExpiresAt = tonumber(cache.licenseExpiresAt) or 0
+    licenseState.keyHint = type(cache.keyHint) == "string" and cache.keyHint or nil
+    licenseState.maxDevices = tonumber(cache.maxDevices) or 0
+    saveLicenseCache()
+    return cache
+end
+
+local function licensePost(path, payload)
+    local response, err = performRequest({
+        Url = PRIMEHUB_LICENSE_SERVER .. path,
+        Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" },
+        Body = HttpService:JSONEncode(payload or {}),
+    })
+    if not response then return nil, "Network error: " .. tostring(err or "request failed") end
+
+    local status = tonumber(response.StatusCode or response.Status or response.status) or 0
+    local body = response.Body or response.body or response.ResponseBody or ""
+    local data = decodeJsonSafe(body) or {}
+    if status < 200 or status >= 300 or data.ok == false then
+        return nil, tostring(data.message or data.code or ("HTTP " .. tostring(status))), data
+    end
+    return data, nil
+end
+
+local function setLicenseActive(data, key)
+    licenseState.active = true
+    licenseState.status = "ACTIVE"
+    licenseState.message = "PrimeHub license verified"
+    licenseState.licenseKey = key or licenseState.licenseKey
+    licenseState.keyHint = data.keyHint or licenseState.keyHint
+    licenseState.leaseToken = data.leaseToken or licenseState.leaseToken
+    licenseState.leaseExpiresAt = tonumber(data.expiresAt) or licenseState.leaseExpiresAt or 0
+    licenseState.licenseExpiresAt = tonumber(data.licenseExpiresAt) or licenseState.licenseExpiresAt or 0
+    licenseState.maxDevices = tonumber(data.maxDevices) or licenseState.maxDevices or 0
+    env.PrimeHubLicenseValid = true
+    saveLicenseCache()
+    notifyLicenseChanged()
+    return true
+end
+
+local function setLicenseError(message)
+    licenseState.active = false
+    licenseState.status = "LOCKED"
+    licenseState.message = tostring(message or "License verification failed")
+    env.PrimeHubLicenseValid = false
+    notifyLicenseChanged()
+    return false, licenseState.message
+end
+
+local function activatePrimeHubLicense(key)
+    key = tostring(key or ""):gsub("%s+", ""):upper()
+    if key == "" then return setLicenseError("Enter a PrimeHub license key") end
+    licenseState.status = "CHECKING"
+    licenseState.message = "Verifying license..."
+    notifyLicenseChanged()
+    local data, err = licensePost("/v1/hub/activate", {
+        licenseKey = key,
+        installationId = licenseState.installationId,
+        productId = PRIMEHUB_PRODUCT_ID,
+        buildId = PRIMEHUB_BUILD_ID,
+        version = PRIMEHUB_LICENSE_VERSION,
+    })
+    if not data then return setLicenseError(err) end
+    return setLicenseActive(data, key)
+end
+
+local function renewPrimeHubLicense()
+    if licenseRenewBusy then return false, "renew_busy" end
+    if not licenseState.leaseToken or licenseState.leaseToken == "" then
+        if licenseState.licenseKey then return activatePrimeHubLicense(licenseState.licenseKey) end
+        return setLicenseError("No saved PrimeHub license")
+    end
+    licenseRenewBusy = true
+    local data, err = licensePost("/v1/hub/renew", {
+        leaseToken = licenseState.leaseToken,
+        installationId = licenseState.installationId,
+        productId = PRIMEHUB_PRODUCT_ID,
+        buildId = PRIMEHUB_BUILD_ID,
+        version = PRIMEHUB_LICENSE_VERSION,
+    })
+    licenseRenewBusy = false
+    if not data then return setLicenseError(err) end
+    return setLicenseActive(data, nil)
+end
+
+local function initializeLicense()
+    loadLicenseCache()
+    local now = os.time()
+    if licenseState.leaseToken and licenseState.leaseExpiresAt > (now + 30) then
+        licenseState.active = true
+        licenseState.status = "ACTIVE"
+        licenseState.message = "Cached lease active"
+        env.PrimeHubLicenseValid = true
+        notifyLicenseChanged()
+        return true
+    end
+    if licenseState.licenseKey and licenseState.licenseKey ~= "" then
+        return activatePrimeHubLicense(licenseState.licenseKey)
+    end
+    return setLicenseError("Enter a PrimeHub license key")
+end
+
+local function licenseRenewWorker()
+    while env.PrimeHubRuntimeId == RUNTIME_ID do
+        if licenseState.active then
+            local remaining = (tonumber(licenseState.leaseExpiresAt) or 0) - os.time()
+            if remaining <= 300 then
+                local ok = renewPrimeHubLicense()
+                if not ok then return end
+            end
+        end
+        task.wait(30)
+    end
+end
+
+local function deactivatePrimeHubLicense()
+    if licenseState.leaseToken then
+        pcall(function()
+            licensePost("/v1/hub/deactivate", {
+                leaseToken = licenseState.leaseToken,
+                installationId = licenseState.installationId,
+                productId = PRIMEHUB_PRODUCT_ID,
+            })
+        end)
+    end
+    licenseState.leaseToken = nil
+    licenseState.leaseExpiresAt = 0
+    licenseState.active = false
+    licenseState.status = "LOCKED"
+    licenseState.message = "License deactivated on this device"
+    env.PrimeHubLicenseValid = false
+    saveLicenseCache()
+    notifyLicenseChanged()
+end
+
+
+local HOP_QUEUE_STRATEGY = "lowpop-3to6-instant-native-v81-r5"
+
+local function pruneVisitTimestamps(state)
+    state.serverVisits = type(state.serverVisits) == "table" and state.serverVisits or {}
+    state.serverBlockedUntil = type(state.serverBlockedUntil) == "table" and state.serverBlockedUntil or {}
+    local now = os.time()
+    local cooldown = math.max(30, tonumber(env.HopVisitedCooldown) or 1500)
