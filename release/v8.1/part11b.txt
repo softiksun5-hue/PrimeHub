@@ -1,0 +1,262 @@
+        -- server-hop loop. The strict identity checks above already prevent us from
+        -- storing a completely unrelated inventory fruit.
+        env.HoldingHighTierFruit = false
+        AddLog("Storage attempt failed; AutoHop will continue.", Color3.fromRGB(255, 200, 0))
+        return false
+    end)
+
+    processingFruit = false
+    activeWorldDropTarget = nil
+    if not ok then
+        AddLog("processFruit error: " .. tostring(result), Color3.fromRGB(255, 100, 100))
+        cleanupFlight()
+        if not env.HoldingHighTierFruit then schedulePostFruitHop("process error") end
+        return false
+    end
+
+    if not env.HoldingHighTierFruit then
+        schedulePostFruitHop(result == true and "fruit resolved" or "fruit attempt finished")
+    end
+    return result == true
+end
+
+local seenTeleportPrompts = setmetatable({}, {__mode = "k"})
+
+local function collectPromptText(prompt)
+    local collected = ""
+    if not prompt then return collected end
+    local descendants = {}
+    pcall(function() descendants = prompt:GetDescendants() end)
+    for _, node in ipairs(descendants) do
+        local isText = false
+        pcall(function()
+            isText = node:IsA("TextLabel") or node:IsA("TextButton")
+        end)
+        if isText and type(node.Text) == "string" then
+            collected = collected .. " " .. node.Text
+        end
+    end
+    return collected
+end
+
+local function observeTeleportErrorPrompt()
+    -- IMPORTANT: Stage 11 destroyed the prompt instance itself. Roblox kept the
+    -- modal dimmer, leaving the whole screen grey. PrimeHub 7.9 only observes/logs.
+    local promptGui = nil
+    pcall(function() promptGui = CoreGui:FindFirstChild("RobloxPromptGui") end)
+    local overlay = nil
+    pcall(function() overlay = promptGui and promptGui:FindFirstChild("promptOverlay") end)
+    if not overlay then return nil end
+
+    local children = {}
+    pcall(function() children = overlay:GetChildren() end)
+    for _, prompt in ipairs(children) do
+        local text = collectPromptText(prompt)
+        local lower = string.lower(text)
+        local isHopFailure = string.find(lower, "773", 1, true)
+            or string.find(lower, "server is full", 1, true)
+            or string.find(lower, "server full", 1, true)
+            or string.find(lower, "teleport", 1, true)
+            or string.find(lower, "unauthorized", 1, true)
+
+        if isHopFailure and text ~= "" then
+            local previous = seenTeleportPrompts[prompt]
+            if previous ~= text then
+                seenTeleportPrompts[prompt] = text
+                hopDebug("Roblox teleport prompt observed: " .. text)
+                return text
+            end
+        end
+    end
+    return nil
+end
+
+local fruitDetected = false
+local hopping = false
+local teleportFailureSerial = 0
+local lastTeleportFailure = nil
+local ServerHop
+
+-- Roblox can accept a teleport request and reject it a moment later. Keep one
+-- listener alive for the entire script so late failures (including a server
+-- becoming full after discovery) trigger another hop instead of killing the loop.
+local teleportFailConnection = nil
+pcall(function()
+    teleportFailConnection = TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage, placeId)
+        if player ~= LocalPlayer then return end
+        if placeId and tonumber(placeId) and tonumber(placeId) ~= tonumber(game.PlaceId) then return end
+
+        teleportFailureSerial = teleportFailureSerial + 1
+        lastTeleportFailure = {
+            result = teleportResult,
+            message = tostring(errorMessage or "Teleport failed"),
+        }
+
+        local rejectLine = "Teleport rejected [" .. tostring(teleportResult) .. "]: " .. lastTeleportFailure.message
+        AddLog(rejectLine, Color3.fromRGB(255, 120, 80))
+        executorLog("WARN", rejectLine)
+        hopDebug("TeleportInitFailed placeId=" .. tostring(placeId)
+            .. " result=" .. tostring(teleportResult)
+            .. " message=" .. tostring(lastTeleportFailure.message))
+
+        -- If the rejection arrives after ServerHop already returned, resume
+        -- automatically. This is the important fix for late 773/full-server errors.
+        task.spawn(function()
+            task.wait(math.max(0.5, tonumber(env.HopRetryDelay) or 2))
+            if runtimeActive()
+                and env.AutoHop
+                and not env.HoldingHighTierFruit
+                and not hopping
+                and type(ServerHop) == "function"
+            then
+                AddLog("Retrying hop after teleport rejection...", Color3.fromRGB(255, 200, 0))
+                ServerHop()
+            end
+        end)
+    end)
+end)
+
+local function responseLooksLikeFailure(value)
+    if value == false then return true, "native returned false" end
+    if type(value) == "string" then
+        local lower = string.lower(value)
+        if string.find(lower, "full", 1, true)
+            or string.find(lower, "fail", 1, true)
+            or string.find(lower, "error", 1, true)
+            or string.find(lower, "unauthorized", 1, true)
+        then
+            return true, value
+        end
+    end
+    return false, nil
+end
+
+local function waitForTeleportFailure(serialBefore)
+    local deadline = tick() + math.max(1, tonumber(env.HopFailureWindow) or 3)
+    while runtimeActive() and tick() < deadline do
+        if teleportFailureSerial ~= serialBefore then
+            local detail = lastTeleportFailure and lastTeleportFailure.message or "late teleport failure"
+            return false, detail
+        end
+
+        -- Some server-initiated teleports show a Roblox prompt without reliably
+        -- surfacing through TeleportInitFailed to the executor. Observe it as an
+        -- extra signal, but NEVER destroy the prompt/overlay.
+        local promptText = observeTeleportErrorPrompt()
+        if promptText then
+            teleportFailureSerial = teleportFailureSerial + 1
+            lastTeleportFailure = {
+                result = "RobloxPrompt",
+                message = tostring(promptText),
+            }
+            return false, tostring(promptText)
+        end
+
+        task.wait(0.1)
+    end
+    return true, "initiated"
+end
+
+local function requestTeleportToServer(server)
+    if type(server) ~= "table" then return false, "invalid_server" end
+    local serverId = tostring(server.id or "")
+    if serverId == "" then return false, "missing_server_id" end
+
+    local freeSlots = tonumber(server._primeHubFreeSlots)
+        or math.max(0, (tonumber(server.maxPlayers) or 0) - (tonumber(server.playing) or 0))
+
+    local summary = string.format(
+        "Trying server %s | players %s/%s | free %s",
+        string.sub(serverId, 1, 8),
+        tostring(server.playing or "?"),
+        tostring(server.maxPlayers or "?"),
+        tostring(freeSlots)
+    )
+    AddLog(summary, Color3.fromRGB(0, 200, 255))
+    hopDebug("candidate fullId=" .. serverId
+        .. " playing=" .. tostring(server.playing)
+        .. " maxPlayers=" .. tostring(server.maxPlayers)
+        .. " free=" .. tostring(freeSlots))
+
+    rememberVisitedServer(serverId)
+
+    local previousHopCount = hopCount
+    updateStats(previousHopCount + 1, nil)
+    queueReloadAfterTeleport()
+
+    local serialBefore = teleportFailureSerial
+    local nativeBrowser = nil
+    pcall(function()
+        nativeBrowser = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    end)
+
+    -- Blox Fruits uses this server-side browser remote. This is essential on
+    -- experiences where client-initiated TeleportService calls are Unauthorized.
+    if env.HopPreferNativeBrowser
+        and nativeBrowser
+        and nativeBrowser:IsA("RemoteFunction")
+    then
+        hopDebug("teleport method=__ServerBrowser RemoteFunction command=teleport server=" .. serverId)
+
+        local invokeOk, invokeResult = pcall(function()
+            return nativeBrowser:InvokeServer("teleport", serverId)
+        end)
+
+        hopDebug("native invoke ok=" .. tostring(invokeOk) .. " result=" .. tostring(invokeResult))
+
+        if not invokeOk then
+            updateStats(previousHopCount, nil)
+            executorLog("WARN", "__ServerBrowser invoke failed: " .. tostring(invokeResult))
+            return false, "native_invoke_error: " .. tostring(invokeResult)
+        end
+
+        local rejected, rejectReason = responseLooksLikeFailure(invokeResult)
+        if rejected then
+            updateStats(previousHopCount, nil)
+            return false, "native_rejected: " .. tostring(rejectReason)
+        end
+
+        local initiated, detail = waitForTeleportFailure(serialBefore)
+        if not initiated then
+            updateStats(previousHopCount, nil)
+            return false, detail
+        end
+
+        return true, "native_initiated"
+    end
+
+    -- Fallback only. On the user's current Blox Fruits instance this path was
+    -- observed to return TeleportResult.Unauthorized, so make that very visible.
+    executorLog("WARN", "__ServerBrowser unavailable; falling back to client TeleportService")
+    hopDebug("teleport method=TeleportService server=" .. serverId)
+
+    local callOk, callErr = pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+    end)
+
+    if not callOk then
+        updateStats(previousHopCount, nil)
+        executorLog("ERROR", "TeleportService call error: " .. tostring(callErr))
+        return false, "teleport_call_error: " .. tostring(callErr)
+    end
+
+    local initiated, detail = waitForTeleportFailure(serialBefore)
+    if not initiated then
+        updateStats(previousHopCount, nil)
+        return false, detail
+    end
+
+    return true, "fallback_initiated"
+end
+
+ServerHop = function()
+    if hopping then return false end
+    if env.HoldingHighTierFruit then
+        AddLog("Hop blocked: Holding high-tier fruit in Safe Zone", Color3.fromRGB(255, 200, 0))
+        return false
+    end
+
+    hopping = true
+    local ok, result = pcall(function()
+        local fruits, preHopStats = scanWorkspaceForFruits("pre-hop")
+        if #fruits > 0 then
