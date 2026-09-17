@@ -1,0 +1,257 @@
+lon = tonumber(env.FlightProgressEpsilon) or 75
+                local noProgressTimeout = tonumber(env.FlightNoProgressTimeout) or 15
+                local targetLeftWorkspace = false
+                local targetStructureLost = false
+                local authoritativeFallbackUsed = false
+                local authoritativeState = env.PrimeHubPS and env.PrimeHubPS.authoritativeDrop or nil
+                local authoritativeConfirmed = authoritativeState
+                    and authoritativeState.instance == fruit
+                    and authoritativeState.confirmed == true
+
+                while runtimeActive() and tick() < flightDeadline do
+                    local root = getPlayerRoot()
+                    local character = LocalPlayer.Character
+                    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+                    if not root or not humanoid or humanoid.Health <= 0 then break end
+
+                    local inWorkspace = false
+                    pcall(function() inWorkspace = fruit and fruit:IsDescendantOf(workspace) end)
+
+                    local recoveredAuthoritativeTool = env.PrimeHubPS
+                        and env.PrimeHubPS.recoveredTools
+                        and env.PrimeHubPS.recoveredTools[fruit] == true
+
+                    local handle = fruit and getDroppedFruitPart(fruit) or nil
+                    local targetPosition = nil
+
+                    if handle then
+                        targetPosition = handle.Position + Vector3.new(0, pickupOffset, 0)
+                        if authoritativeConfirmed and authoritativeState then
+                            authoritativeState.position = handle.Position
+                        end
+                    elseif authoritativeConfirmed
+                        and authoritativeState
+                        and typeof(authoritativeState.position) == "Vector3"
+                    then
+                        authoritativeFallbackUsed = true
+                        targetStructureLost = true
+                        targetPosition = authoritativeState.position + Vector3.new(0, pickupOffset, 0)
+                    else
+                        if not fruit or not fruit.Parent or not inWorkspace then
+                            targetLeftWorkspace = true
+                        else
+                            targetStructureLost = true
+                        end
+                        break
+                    end
+
+                    if (not fruit or not fruit.Parent or not inWorkspace)
+                        and not authoritativeFallbackUsed
+                        and not recoveredAuthoritativeTool
+                    then
+                        targetLeftWorkspace = true
+                        break
+                    end
+
+                    if fruit and fruit.Parent
+                        and not isServerWorldFruitModel(fruit)
+                        and not recoveredAuthoritativeTool
+                        and not authoritativeFallbackUsed
+                    then
+                        targetStructureLost = true
+                        break
+                    end
+
+                    local remaining = (root.Position - targetPosition).Magnitude
+                    lastRemaining = remaining
+                    if remaining <= 8 then break end
+
+                    if remaining <= (bestRemaining - progressEpsilon) then
+                        bestRemaining = remaining
+                        lastProgressAt = tick()
+                    elseif (tick() - lastProgressAt) >= noProgressTimeout then
+                        flightStalled = true
+                        break
+                    end
+
+                    if authoritativeFallbackUsed and not env.PrimeHubPS.authoritativeFlightLogged then
+                        env.PrimeHubPS.authoritativeFlightLogged = true
+                        executorLog("EVENT", string.format(
+                            "PRESPAWN CONTINUE TO LAST SPAWN POSITION remaining=%.0f",
+                            remaining
+                        ))
+                    end
+
+                    if not applyFlight(targetPosition, flightSpeed) then break end
+                    task.wait(0.1)
+                end
+                cleanupFlight()
+
+                if (targetLeftWorkspace or targetStructureLost) and lastRemaining > 20 then
+                    local authoritativeStateNow = env.PrimeHubPS and env.PrimeHubPS.authoritativeDrop or nil
+                    local authoritativeCanContinue = authoritativeStateNow
+                        and authoritativeStateNow.instance == fruit
+                        and authoritativeStateNow.confirmed == true
+                        and typeof(authoritativeStateNow.position) == "Vector3"
+
+                    if authoritativeCanContinue then
+                        executorLog("EVENT", string.format(
+                            "PRESPAWN authoritative target structure gone but flight reached fallback phase remaining=%.0f",
+                            lastRemaining
+                        ))
+                    else
+                        executorLog("EVENT", string.format(
+                            "WORLD_DROP became unavailable during flight remaining=%.0f leftWorkspace=%s structureLost=%s; aborting immediately",
+                            lastRemaining, tostring(targetLeftWorkspace), tostring(targetStructureLost)
+                        ))
+                        return false
+                    end
+                end
+
+                local authoritativeStateNow = env.PrimeHubPS and env.PrimeHubPS.authoritativeDrop or nil
+                if authoritativeStateNow
+                    and authoritativeStateNow.instance == fruit
+                    and authoritativeStateNow.confirmed == true
+                    and typeof(authoritativeStateNow.position) == "Vector3"
+                then
+                    local rootNow = getPlayerRoot()
+                    local inspectDistance = rootNow and (rootNow.Position - authoritativeStateNow.position).Magnitude or -1
+                    if inspectDistance >= 0 and inspectDistance <= 25 then
+                        local recoveredNearby = nil
+                        local nearbyNames = {}
+                        local okNearby, nearbyObjects = pcall(function() return workspace:GetDescendants() end)
+                        if okNearby and type(nearbyObjects) == "table" then
+                            for _, obj in ipairs(nearbyObjects) do
+                                if obj:IsA("Tool")
+                                    and obj.Parent
+                                    and not isInsidePlayerCharacter(obj)
+                                    and isFruitLikeTool(obj)
+                                then
+                                    local h = getDroppedFruitPart(obj)
+                                    if h then
+                                        local d = (h.Position - authoritativeStateNow.position).Magnitude
+                                        if d <= 40 then
+                                            nearbyNames[#nearbyNames + 1] = string.format(
+                                                "%s@%.1f%s",
+                                                tostring(obj.Name), d,
+                                                isPlayerDroppedFruit(obj) and "{PLAYER_DROP}" or ""
+                                            )
+                                            if not recoveredNearby
+                                                and not isPlayerDroppedFruit(obj)
+                                                and not (env.PrimeHubPS.preSpawnBaselineTools and env.PrimeHubPS.preSpawnBaselineTools[obj])
+                                            then
+                                                recoveredNearby = obj
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        executorLog("EVENT", string.format(
+                            "PRESPAWN ARRIVED AT SPAWN POSITION distance=%.1f nearby=[%s]",
+                            inspectDistance, table.concat(nearbyNames, ", ")
+                        ))
+
+                        if recoveredNearby then
+                            env.PrimeHubPS.recoveredTools[recoveredNearby] = true
+                            fruit = recoveredNearby
+                            activeWorldDropTarget = recoveredNearby
+                            preferredName = fruitNameFromTool(recoveredNearby)
+                            if preferredName == "Fruit " then preferredName = nil end
+                            expectedOriginal = scanOriginalName(recoveredNearby)
+                                or normalizeFruitStorageIdFromName(preferredName)
+                            pickupOffset = tonumber(env.FlyOffset) or 5
+                            executorLog("EVENT", string.format(
+                                "PRESPAWN SPAWN-POSITION FRUIT FOUND tool=%s OriginalName=%s",
+                                tostring(recoveredNearby.Name), tostring(expectedOriginal)
+                            ))
+                        elseif not getDroppedFruitPart(fruit) then
+                            executorLog("EVENT", "PRESPAWN SPAWN POSITION EMPTY: no non-player fruit Tool within 40 studs")
+                            AddLog("[DEV] Reached hourly spawn position: no valid fruit found nearby.",
+                                Color3.fromRGB(255, 190, 90))
+                            return false
+                        end
+                    end
+                end
+
+                if flightStalled and lastRemaining > 20 then
+                    executorLog("PICKUP", string.format(
+                        "FLIGHT watchdog: no meaningful progress for %.1fs remaining=%.0f; aborting target",
+                        noProgressTimeout, lastRemaining
+                    ))
+                    return false
+                end
+
+                local endRoot = getPlayerRoot()
+                local endHandle = getDroppedFruitPart(fruit)
+                if endRoot and endHandle then
+                    local remaining = (endRoot.Position - (endHandle.Position + Vector3.new(0, pickupOffset, 0))).Magnitude
+                    executorLog("PICKUP", string.format("FLIGHT end remaining=%.1f target=%s", remaining, tostring(fruit.Name)))
+                end
+            end
+        end
+
+        local deadline = tick() + 5.0
+
+        while not tool and runtimeActive() and tick() < deadline do
+            if not fruit.Parent then
+                tool = findPickedUpTool(beforePickup, preferredName, expectedOriginal)
+                if tool then break end
+            end
+
+            local handle = getDroppedFruitPart(fruit)
+            local root = getPlayerRoot()
+            if handle and root then
+                local targetPosition = handle.Position + Vector3.new(0, pickupOffset, 0)
+                local distance = (root.Position - targetPosition).Magnitude
+
+                if distance <= 8 then
+                    root.CFrame = handle.CFrame + Vector3.new(0, pickupOffset, 0)
+                    root.Velocity = Vector3.zero
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.RotVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                else
+                    applyFlight(targetPosition, flightSpeed)
+                end
+            elseif not root then
+                AddLog("Flight/pickup failed: root unavailable.", Color3.fromRGB(255, 100, 100))
+                break
+            end
+
+            task.wait(0.1)
+            tool = findPickedUpTool(beforePickup, preferredName, expectedOriginal)
+        end
+        cleanupFlight()
+
+        if not tool then
+            executorLog("PICKUP", string.format(
+                "strict pickup failed for name=%q OriginalName=%q; unrelated inventory Tools ignored",
+                tostring(preferredName), tostring(expectedOriginal)
+            ))
+            failedPickupTargets[fruit] = tick() + 30
+            AddLog("Pickup timed out: " .. tostring(fruit.Name) .. " — blacklisting target and hopping.",
+                Color3.fromRGB(255, 180, 80))
+            executorLog("PICKUP", "failed WORLD_DROP blacklisted for 30s; AutoHop may leave current server")
+            return false
+        end
+
+        if not toolMatchesFruitIdentity(tool, preferredName, expectedOriginal) then
+            executorLog("WARN", "Rejected mismatched pickup Tool: " .. tostring(tool.Name))
+            AddLog("Pickup identity mismatch; ignoring " .. tostring(tool.Name), Color3.fromRGB(255, 180, 80))
+            return false
+        end
+
+        updateStats(nil, fruitCount + 1)
+        AddLog("Picked up: " .. tostring(tool.Name), Color3.fromRGB(0, 255, 100))
+        executorLog("STORE", "pickup detected ptr=" .. tostring(tool) .. " name=" .. tostring(tool.Name)
+            .. " parent=" .. toolParentName(tool) .. " expectedOriginal=" .. tostring(expectedOriginal))
+        task.wait(tonumber(env.StorePostPickupDelay) or 0.35)
+
+        local refreshedTool, replacedAfterPickup = reacquireHeldFruitTool(
+            tool, preferredName, beforePickup, env.StoreReacquireTimeout, expectedOriginal
+        )
+        if refreshedTool then
+            if replacedAfterPickup then
+                e
