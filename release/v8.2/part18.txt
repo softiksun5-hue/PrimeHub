@@ -1,0 +1,294 @@
+ton1 or input.UserInputType==Enum.UserInputType.Touch) then
+            draggingMini=false
+            if not miniMoved then setPrimeHubMinimized(false) end
+        end
+    end)
+    
+    local workersStarted=false
+    local function startWorkersIfLicensed()
+        if workersStarted or not licenseState.active then return false end
+        workersStarted=true
+        env.PrimeHubLicenseValid=true
+        startWorkers()
+        if env.PrimeHubLicenseRequired then
+            task.spawn(licenseRenewWorker)
+        end
+        AddLog("[PrimeHub] Runtime unlocked.",THEME.good)
+        return true
+    end
+    
+    local lastLicenseUiActive = false
+    local function refreshLicenseUI()
+        local on=licenseState.active
+        local becameActive = on and not lastLicenseUiActive
+        licenseStatus.Text=on and ("ACTIVE  "..tostring(licenseState.keyHint or "")) or tostring(licenseState.status or "LOCKED")
+        licenseStatus.TextColor3=on and THEME.good or THEME.bad
+        licenseMessage.Text=tostring(licenseState.message or "")
+        licenseDot.BackgroundColor3=on and THEME.good or THEME.bad
+        licenseMini.Text=on and "LICENSE ACTIVE" or "LICENSE LOCKED"
+        licenseMini.TextColor3=on and THEME.good or THEME.bad
+        activeBadgeText.Text=on and "ACTIVE" or "LOCKED"
+        activeBadgeText.TextColor3=on and THEME.good or THEME.bad
+        if licenseState.installationId then licenseDevice.Text="Device: "..string.sub(tostring(licenseState.installationId),1,28) end
+        local licenseExp=tonumber(licenseState.licenseExpiresAt) or 0
+        if on then
+            if licenseExp>0 then
+                local remaining=math.max(0,licenseExp-os.time())
+                local days=math.floor(remaining/86400)
+                local hours=math.floor((remaining%86400)/3600)
+                local minutes=math.floor((remaining%3600)/60)
+                licenseExpiry.Text="Expires: "..os.date("%d %b %Y",licenseExp)
+                if days>0 then
+                    licenseRemaining.Text=string.format("Time left: %dd %dh",days,hours)
+                elseif hours>0 then
+                    licenseRemaining.Text=string.format("Time left: %dh %dm",hours,minutes)
+                else
+                    licenseRemaining.Text=string.format("Time left: %dm",minutes)
+                end
+            else
+                licenseExpiry.Text="License: FOREVER"
+                licenseRemaining.Text="Time left: Unlimited"
+            end
+        else
+            licenseExpiry.Text="License: --"
+            licenseRemaining.Text="Time left: --"
+        end
+        if on then
+            statusLabel.Text="READY"; statusLabel.TextColor3=THEME.purpleHi; refreshServerTimingUI()
+            startWorkersIfLicensed()
+            if becameActive and currentPage == "License" then
+                switchPage("Dashboard")
+            end
+        else
+            statusLabel.Text="LOCKED"; statusLabel.TextColor3=THEME.bad; subStatus.Text="License required"
+            switchPage("License")
+        end
+        lastLicenseUiActive = on
+    end
+    onLicenseChanged(refreshLicenseUI)
+    
+    local initialState=initializeRuntime()
+    hopCountLabel.Text=tostring(hopCount); fruitCountLabel.Text=tostring(fruitCount); speedValue.Text=tostring(env.TweenSpeed)
+    local initialRatio=math.clamp(((tonumber(env.TweenSpeed) or 230)-50)/180,0,1); fill.Size=UDim2.new(initialRatio,0,1,0); knob.Position=UDim2.new(initialRatio,-8,.5,-8)
+    local qstate=loadRuntimeState(); refreshServerAgeQueueStats(qstate.serverQueue or {}); refreshServerTimingUI(); teamInfo.Text="Preferred team: "..tostring(env.PreferredTeam)
+    
+    AddLog("[PrimeHub] PrimeHub 8.2 PUBLIC loaded.",THEME.purpleHi)
+    AddLog(string.format("Automation: Sniper=%s | AutoHop=%s | ESP=%s | Drops=%s", tostring(env.AutoFruitSniper), tostring(env.AutoHop), tostring(env.FruitESP), env.OnlyServerSpawnedFruits and "OFF" or "ON"), THEME.muted)
+    hopDebug("PrimeHub 8.0 loaded | PlaceId="..tostring(game.PlaceId).." JobId="..tostring(game.JobId))
+    hopDebug("Sea auto-detected="..tostring(getCurrentSea()).." | PlaceId="..tostring(game.PlaceId))
+    executorLog("SCAN",string.format("scanner mode=%s allFruits=%s dropFilter=%s | strategy=%s serverList=NATIVE_ALLPAGES range=3-6 queue=%d cooldown=%ss",env.OnlyServerSpawnedFruits and "world-drop-fast" or (env.ScanDescendants and "descendants" or "top-level"),tostring(env.SniperAllFruits),env.OnlyServerSpawnedFruits and "SERVER_ONLY" or "OFF",HOP_QUEUE_STRATEGY,tonumber(env.HopQueueTarget) or 200,tostring(env.HopVisitedCooldown)))
+    hopDebug("__ServerBrowser="..tostring(ReplicatedStorage:FindFirstChild("__ServerBrowser")))
+    
+    task.spawn(function()
+        while gui and gui.Parent do
+            task.wait(1)
+            pcall(refreshServerTimingUI)
+        end
+    end)
+
+    -- Start locked, then let the completed license check choose the final page.
+    -- This avoids the old race where a successful cached-license check opened Dashboard
+    -- and the next line immediately forced the UI back to License.
+    switchPage("License")
+    task.spawn(function()
+        initializeLicense()
+        refreshLicenseUI()
+    end)
+end
+buildPrimeHubUI()
+
+-- Warm the 3-6 queue in the background while the user is on the UI/startup scan.
+-- AutoHop can then select a candidate immediately instead of waiting for discovery.
+task.spawn(function()
+    task.wait(0.35)
+    pcall(function() collectUnvisitedServers(math.max(12, tonumber(env.HopQueueRefillThreshold) or 12)) end)
+end)
+
+env.PrimeHubServerHop = ServerHop
+env.PrimeHubDebugHop = function()
+    local browser = nil
+    pcall(function() browser = ReplicatedStorage:FindFirstChild("__ServerBrowser") end)
+    local info = {
+        runtimeId = RUNTIME_ID,
+        active = runtimeActive(),
+        autoHop = env.AutoHop,
+        holdingHighTier = env.HoldingHighTierFruit,
+        hopping = hopping,
+        placeId = game.PlaceId,
+        jobId = game.JobId,
+        nativeBrowser = browser and browser.ClassName or nil,
+        teleportFailureSerial = teleportFailureSerial,
+        lastTeleportFailure = lastTeleportFailure,
+    }
+    executorLog("INFO", "PrimeHubDebugHop nativeBrowser=" .. tostring(info.nativeBrowser)
+        .. " autoHop=" .. tostring(info.autoHop)
+        .. " hopping=" .. tostring(info.hopping)
+        .. " failureSerial=" .. tostring(info.teleportFailureSerial))
+    return info
+end
+
+env.PrimeHubScanDebug = function()
+    local fruits, stats = scanWorkspaceForFruits("manual")
+    executorLog("SCAN", "manual result targetCount=" .. tostring(#fruits))
+    return fruits, stats
+end
+
+env.PrimeHubScanFruits = scanWorkspaceForFruits
+env.PrimeHubDeepScanNow = deepScanWorker
+env.PrimeHubProcessFruit = processFruit
+env.PrimeHubDumpHeldFruits = function()
+    return dumpHeldFruitTools("manual inventory dump")
+end
+
+env.PrimeHubStoreHeldFruit = function()
+    dumpHeldFruitTools("manual store requested")
+    local tool = findFruitTool(nil, nil)
+    if not tool then
+        AddLog("Manual store: no held fruit Tool found.", Color3.fromRGB(255, 180, 80))
+        return false, "no_tool"
+    end
+
+    AddLog("Manual store requested for " .. tostring(tool.Name), Color3.fromRGB(120, 200, 255))
+    local stored, reason, detail = storeFruit(tool, tool.Name, nil)
+    if stored then
+        env.HoldingHighTierFruit = false
+        AddLog("Manual store success: " .. tostring(tool.Name), Color3.fromRGB(0, 255, 100))
+    else
+        AddLog("Manual store failed: " .. tostring(reason) .. " / " .. tostring(detail), Color3.fromRGB(255, 100, 100))
+    end
+    return stored, reason, detail
+end
+env.PrimeHubChooseTeam = function(team)
+    if team == "Marines" then
+        env.PreferredTeam = "Marines"
+    else
+        env.PreferredTeam = "Pirates"
+    end
+    return ensureTeamReady("manual PrimeHubChooseTeam", env.PreferredTeam)
+end
+
+env.PrimeHubServerQueueStatus = function()
+    local state = loadRuntimeState()
+    local queue = type(state.serverQueue) == "table" and state.serverQueue or {}
+    local highCount, midCount, lowCount = 0, 0, 0
+    for _, server in ipairs(queue) do
+        local playing = tonumber(server.playing) or 0
+        if playing >= 8 then highCount=highCount+1
+        elseif playing >= 5 then midCount=midCount+1
+        else lowCount=lowCount+1 end
+    end
+    local info = {
+        queued=#queue, highQueued=highCount, midQueued=midCount, lowQueued=lowCount,
+        strategy=tostring(state.serverQueueStrategy or ""), target=env.HopQueueTarget,
+        builtAt=tonumber(state.serverQueueBuiltAt) or 0, minPlayers=env.HopQueueMinPlayers,
+        maxPlayers=env.HopQueueMaxPlayers, cooldown=env.HopVisitedCooldown,
+        botServerCooldown=env.BotServerCooldown, botServerScreening=env.BotServerScreening,
+    }
+    hopDebug(string.format(
+        "QUEUE STATUS strategy=%s queued=%d high=%d mid=%d low=%d target=%d eligibleBand=%d-%d cooldown=%ss botCooldown=%ss builtAt=%s",
+        info.strategy, info.queued, info.highQueued, info.midQueued, info.lowQueued, tonumber(info.target) or 0,
+        tonumber(info.minPlayers) or 0, tonumber(info.maxPlayers) or 0, tostring(info.cooldown),
+        tostring(info.botServerCooldown), tostring(info.builtAt)
+    ))
+    return info
+end
+
+env.PrimeHubTeamStatus = function()
+    local root = getPlayerRoot()
+    local info = {
+        team = currentTeamName(),
+        preferred = env.PreferredTeam,
+        autoTeam = env.AutoTeam,
+        character = getPlayerCharacter(),
+        root = root,
+    }
+    teamDebug(string.format(
+        "STATUS team=%s preferred=%s auto=%s character=%s root=%s",
+        tostring(info.team), tostring(info.preferred), tostring(info.autoTeam), tostring(info.character), tostring(info.root)
+    ))
+    return info
+end
+
+
+env.PrimeHubActivateLicense = activatePrimeHubLicense
+env.PrimeHubRenewLicense = renewPrimeHubLicense
+env.PrimeHubDeactivateLicense = deactivatePrimeHubLicense
+env.PrimeHubLicenseStatus = function() return licenseState end
+env.PrimeHubStop = function()
+    if env.PrimeHubRuntimeId == RUNTIME_ID then
+        env.PrimeHubRuntimeId = RUNTIME_ID + 1
+    end
+    cleanupFlight()
+    destroyFruitESP()
+    pcall(function() gui:Destroy() end)
+end
+
+env.PrimeHubSelfCheck = function()
+    return {
+        runtimeActive = runtimeActive(),
+        placeId = game.PlaceId,
+        jobId = tostring(game.JobId or ""),
+        requestAvailable = getRequestFunction() ~= nil,
+        queueOnTeleportAvailable = getQueueOnTeleport() ~= nil,
+        filesystemAvailable = type(readfile) == "function" and type(writefile) == "function",
+        commF = CommF_ ~= nil,
+        team = currentTeamName(),
+        preferredTeam = env.PreferredTeam,
+        autoTeam = env.AutoTeam,
+        characterReady = getPlayerRoot() ~= nil,
+        targetFruitsVisible = #scanWorkspaceForFruits(),
+        autoSniper = env.AutoFruitSniper,
+        autoHop = env.AutoHop,
+        fruitESP = env.FruitESP,
+        tweenSpeed = env.TweenSpeed,
+        hopMinFreeSlots = env.HopMinFreeSlots,
+        hopPreferredPlayers = env.HopPreferredPlayers,
+        hopMinPlayers = env.HopMinPlayers,
+        hopMaxPlayers = env.HopMaxPlayers,
+        autoHopInterval = env.AutoHopInterval,
+        postFruitHopDelay = env.PostFruitHopDelay,
+        hopVisitedCooldown = env.HopVisitedCooldown,
+        hopQueueTarget = env.HopQueueTarget,
+        hopQueueRefillThreshold = env.HopQueueRefillThreshold,
+        hopQueueMaxPages = env.HopQueueMaxPages,
+        hopQueueMinPlayers = env.HopQueueMinPlayers,
+        hopQueueMaxPlayers = env.HopQueueMaxPlayers,
+        hopPreferredMinPlayers = env.HopPreferredMinPlayers,
+        hopPreferredMaxPlayers = env.HopPreferredMaxPlayers,
+        onlyServerSpawnedFruits = env.OnlyServerSpawnedFruits,
+        dropFilter = env.OnlyServerSpawnedFruits,
+        hopQueueStrategy = HOP_QUEUE_STRATEGY,
+        botServerScreening = env.BotServerScreening,
+        botServerCooldown = env.BotServerCooldown,
+        currentSea = getCurrentSea(),
+        scanDescendants = env.ScanDescendants,
+        scanDebug = env.ScanDebug,
+        sniperAllFruits = env.SniperAllFruits,
+        hopAttemptLimit = env.HopAttemptLimit,
+        hopRetryDelay = env.HopRetryDelay,
+        initialHopAfterScan = env.InitialHopAfterScan,
+        speedTest = false,
+        selfContained = type(env.PrimeHubSelfSource) == "string",
+        selfSourceBytes = type(env.PrimeHubSelfSource) == "string" and #env.PrimeHubSelfSource or 0,
+        scanPerfCalls = scanPerfCalls,
+        scanPerfFastCalls = scanPerfFastCalls,
+        scanPerfFullCalls = scanPerfFullCalls,
+        scanPerfAverageMs = scanPerfCalls > 0 and (scanPerfTotalMs / scanPerfCalls) or 0,
+        lastHopTransitSeconds = __resumeHopTransitSeconds,
+        teleportFailureSerial = teleportFailureSerial,
+        suppressTeleportErrorPrompt = env.SuppressTeleportErrorPrompt,
+        primeHubVersion = PRIMEHUB_VERSION,
+        licenseActive = licenseState.active,
+        licenseStatus = licenseState.status,
+        licenseKeyHint = licenseState.keyHint,
+        licenseExpiresAt = licenseState.licenseExpiresAt,
+    }
+end
+]====================]
+__primeEnv.PrimeHubSelfSource = __primeSource
+print("[PrimeHub 8.2] Launcher loaded self-contained runtime bytes=" .. tostring(#__primeSource))
+local __primeFn, __primeErr = loadstring(__primeSource)
+if not __primeFn then
+    error("[PrimeHub 8.2] Initial runtime compile failed: " .. tostring(__primeErr))
+end
+return __primeFn()
