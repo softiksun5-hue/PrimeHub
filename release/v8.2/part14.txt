@@ -1,0 +1,267 @@
+DropDistance(instance)
+    local part = getDroppedFruitPart(instance)
+    local root = getPlayerRoot()
+    if part and root then
+        return (part.Position - root.Position).Magnitude
+    end
+    return -1
+end
+
+local function monitorWorldDropLifecycle(instance, origin)
+    if not instance or worldDropLifecycle[instance] then return end
+
+    local record = {
+        seenAt = tick(),
+        origin = tostring(origin or "unknown"),
+        startDistance = worldDropDistance(instance),
+    }
+    worldDropLifecycle[instance] = record
+
+    local path = tostring(instance)
+    pcall(function() path = instance:GetFullName() end)
+    executorLog("EVENT", string.format(
+        "WORLD_DROP track start origin=%s distance=%.0f path=%s",
+        record.origin, record.startDistance, path
+    ))
+
+    local connection
+    local childConnection
+    childConnection = instance.ChildRemoved:Connect(function(child)
+        local childName = tostring(child and child.Name or "nil")
+        if childName == "Handle" or childName == "Fruit" or childName == "FruitAnimator" then
+            if childName == "Handle"
+                and env.PrimeHubPS
+                and env.PrimeHubPS.authoritativeDrop
+                and env.PrimeHubPS.authoritativeDrop.instance == instance
+            then
+                local okPos, pos = pcall(function() return child.Position end)
+                if okPos and typeof(pos) == "Vector3" then
+                    env.PrimeHubPS.authoritativeDrop.position = pos
+                    executorLog("EVENT", string.format(
+                        "PRESPAWN RECOVERY POSITION captured x=%.1f y=%.1f z=%.1f",
+                        pos.X, pos.Y, pos.Z
+                    ))
+                end
+            end
+
+            local lifetime = math.max(0, tick() - record.seenAt)
+            executorLog("EVENT", string.format(
+                "WORLD_DROP structure removed child=%s lifetime=%.2fs activeTarget=%s recoveryGrace=%.2fs",
+                childName, lifetime, tostring(activeWorldDropTarget == instance),
+                tonumber(env.WorldDropRecoveryGrace) or 3.0
+            ))
+        end
+    end)
+
+    connection = instance.AncestryChanged:Connect(function()
+        task.defer(function()
+            if not worldDropLifecycle[instance] then
+                if connection then connection:Disconnect() end
+                return
+            end
+
+            local inWorkspace = false
+            pcall(function() inWorkspace = instance:IsDescendantOf(workspace) end)
+            if inWorkspace then return end
+
+            local lifetime = math.max(0, tick() - record.seenAt)
+            local endDistance = worldDropDistance(instance)
+            local active = activeWorldDropTarget == instance
+            local parentName = "nil"
+            pcall(function()
+                if instance.Parent then parentName = instance.Parent:GetFullName() end
+            end)
+
+            executorLog("EVENT", string.format(
+                "WORLD_DROP track end origin=%s lifetime=%.2fs startDistance=%.0f endDistance=%.0f activeTarget=%s parent=%s",
+                record.origin, lifetime, record.startDistance, endDistance, tostring(active), parentName
+            ))
+
+            worldDropLifecycle[instance] = nil
+            if connection then connection:Disconnect() end
+            if childConnection then childConnection:Disconnect() end
+        end)
+    end)
+end
+
+local function worldDropEventWorker()
+    local eventCount = 0
+    local signal = CollectionService:GetInstanceAddedSignal("WORLD_DROP")
+    local connection
+
+    local function handleWorldDrop(instance)
+        monitorWorldDropLifecycle(instance, "tag-added")
+        eventCount = eventCount + 1
+        local eventId = eventCount
+        local observedAt = tick()
+
+        local authoritative = false
+        local authoritativePosition = nil
+        if env.PrimeHubPS and env.PrimeHubPS.hold and env.PrimeHubPS.hold.active then
+            local okNow, serverNow = pcall(function() return workspace:GetServerTimeNow() end)
+            local boundaryAt = tonumber(env.PrimeHubPS.hold.boundaryAt) or 0
+            if okNow and type(serverNow) == "number" and boundaryAt > 0 then
+                local delta = serverNow - boundaryAt
+                authoritative = delta >= -(tonumber(env.PrimeHubPS.cfg.authoritativeBefore) or 3)
+                    and delta <= (tonumber(env.PrimeHubPS.cfg.authoritativeAfter) or 8)
+                if authoritative then
+                    local part = getDroppedFruitPart(instance)
+                    if part then authoritativePosition = part.Position end
+                    env.PrimeHubPS.authoritativeDrop = {
+                        instance = instance,
+                        observedAt = observedAt,
+                        serverNow = serverNow,
+                        delta = delta,
+                        position = authoritativePosition,
+                    }
+                    env.PrimeHubPS.hold.releaseAt = math.max(
+                        tonumber(env.PrimeHubPS.hold.releaseAt) or 0,
+                        boundaryAt + math.max(45, tonumber(env.PrimeHubPS.cfg.postBoundaryGrace) or 15)
+                    )
+                    executorLog("EVENT", string.format(
+                        "PRESPAWN AUTHORITATIVE DROP event=%d delta=%.2fs boundary=%.3f",
+                        eventId, delta, boundaryAt
+                    ))
+                end
+            end
+        end
+
+        task.spawn(function()
+            local ready = false
+            local attempts = 0
+            local confirmDeadline = tick() + math.max(1.5, tonumber(env.WorldDropRuntimeConfirm) or 0.65) + 1.0
+            while runtimeActive() and tick() < confirmDeadline do
+                attempts = attempts + 1
+                if not instance or not instance.Parent then return end
+                local confirmed, pending = worldDropConfirmStatus(instance)
+                if confirmed then
+                    ready = true
+                    break
+                end
+                if not pending and attempts > 3 then
+                    break
+                end
+                task.wait(0.1)
+            end
+
+            local path = tostring(instance)
+            pcall(function() path = instance:GetFullName() end)
+            local distance = -1
+            local part = getDroppedFruitPart(instance)
+            local root = getPlayerRoot()
+            if part and root then distance = (part.Position - root.Position).Magnitude end
+
+            executorLog("EVENT", string.format(
+                "WORLD_DROP #%d ready=%s attempts=%d readyIn=%.2fs distance=%.0f path=%s",
+                eventId, tostring(ready), attempts, tick() - observedAt, distance, path
+            ))
+
+            if ready and env.AutoFruitSniper and not env.HoldingHighTierFruit and not processingFruit then
+                if authoritative
+                    and env.PrimeHubPS
+                    and env.PrimeHubPS.authoritativeDrop
+                    and env.PrimeHubPS.authoritativeDrop.instance == instance
+                then
+                    env.PrimeHubPS.authoritativeDrop.confirmed = true
+                    local confirmedPart = getDroppedFruitPart(instance)
+                    if confirmedPart then
+                        env.PrimeHubPS.authoritativeDrop.position = confirmedPart.Position
+                    end
+                    executorLog("EVENT", "PRESPAWN AUTHORITATIVE DROP confirmed; structure loss will not abort flight")
+                end
+                fruitDetected = true
+                AddLog("[PrimeHub] WORLD_DROP event detected. Starting sniper immediately.", Color3.fromRGB(0, 255, 100))
+                processFruit(instance)
+            elseif authoritative and env.AutoFruitSniper and not env.HoldingHighTierFruit and not processingFruit then
+                local recoveryDeadline = tick() + math.max(1, tonumber(env.PrimeHubPS.cfg.recoverySearchSeconds) or 5)
+                local recovered = nil
+                local recoveredDistance = math.huge
+
+                while runtimeActive() and tick() < recoveryDeadline and not recovered do
+                    local okObjects, objects = pcall(function() return workspace:GetDescendants() end)
+                    if okObjects and type(objects) == "table" then
+                        for _, obj in ipairs(objects) do
+                            if obj:IsA("Tool")
+                                and obj.Parent
+                                and not isInsidePlayerCharacter(obj)
+                                and isFruitLikeTool(obj)
+                                and getDroppedFruitPart(obj)
+                                and not (env.PrimeHubPS.preSpawnBaselineTools and env.PrimeHubPS.preSpawnBaselineTools[obj])
+                            then
+                                if isPlayerDroppedFruit(obj) then
+                                    env.PrimeHubPS.rejectedPlayerDrops = env.PrimeHubPS.rejectedPlayerDrops or setmetatable({}, {__mode="k"})
+                                    if not env.PrimeHubPS.rejectedPlayerDrops[obj] then
+                                        env.PrimeHubPS.rejectedPlayerDrops[obj] = true
+                                        executorLog("EVENT", string.format(
+                                            "PRESPAWN RECOVERY REJECT player-drop tool=%s",
+                                            tostring(obj.Name)
+                                        ))
+                                    end
+                                else
+                                    local distance = 0
+                                    local handle = getDroppedFruitPart(obj)
+                                    if authoritativePosition and handle then
+                                        distance = (handle.Position - authoritativePosition).Magnitude
+                                    end
+                                    local maxDistance = tonumber(env.PrimeHubPS.cfg.recoveryMaxDistance) or 120
+                                    if (not authoritativePosition or distance <= maxDistance) and distance < recoveredDistance then
+                                        recovered = obj
+                                        recoveredDistance = distance
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    if not recovered then task.wait(0.08) end
+                end
+
+                if recovered then
+                    env.PrimeHubPS.recoveredTools[recovered] = true
+                    fruitDetected = true
+                    executorLog("EVENT", string.format(
+                        "PRESPAWN FRUIT RECOVERED event=%d tool=%s distance=%.1f wrapperReady=%s",
+                        eventId, tostring(recovered.Name),
+                        recoveredDistance == math.huge and -1 or recoveredDistance,
+                        tostring(ready)
+                    ))
+                    AddLog("[PrimeHub] Pre-spawn fruit recovered from hourly WORLD_DROP. Starting sniper.",
+                        Color3.fromRGB(0, 255, 100))
+                    processFruit(recovered)
+                else
+                    local recoveryPos = env.PrimeHubPS.authoritativeDrop
+                        and env.PrimeHubPS.authoritativeDrop.position
+                        or authoritativePosition
+
+                    if typeof(recoveryPos) == "Vector3" then
+                        executorLog("EVENT", string.format(
+                            "PRESPAWN RECOVERY FLIGHT event=%d x=%.1f y=%.1f z=%.1f",
+                            eventId, recoveryPos.X, recoveryPos.Y, recoveryPos.Z
+                        ))
+                        AddLog("[PrimeHub] Hourly fruit streamed out; flying to its last known spawn position.",
+                            Color3.fromRGB(255, 210, 90))
+
+                        local teamReady = ensureTeamReady("pre-spawn streaming recovery")
+                        if teamReady then
+                            local recoveryFlightDeadline = tick() + 35
+                            env.ViajandoAteAFruta = true
+
+                            while runtimeActive()
+                                and tick() < recoveryFlightDeadline
+                                and not processingFruit
+                                and not env.HoldingHighTierFruit
+                            do
+                                if instance and instance.Parent and isDroppedFruit(instance) then
+                                    local confirmedNow = select(1, worldDropConfirmStatus(instance))
+                                    if confirmedNow or isServerWorldFruitModel(instance) then
+                                        cleanupFlight()
+                                        fruitDetected = true
+                                        executorLog("EVENT", "PRESPAWN WRAPPER RECOVERED during recovery flight")
+                                        AddLog("[PrimeHub] Hourly WORLD_DROP streamed back in. Starting pickup.",
+                                            Color3.fromRGB(0, 255, 100))
+                                        processFruit(instance)
+                                        recovered = instance
+                                        break
+                                    end
+                                end
+
+                                local okObjects2, objects2 = pcall(function()
