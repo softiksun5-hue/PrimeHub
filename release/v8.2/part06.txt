@@ -1,0 +1,305 @@
+unt = tonumber(info.Count or info.count or info.Playing or info.playing)
+                        if count then
+                            pageHadRows = true
+                            nativeRows = nativeRows + 1
+                            local maxPlayers = tonumber(info.MaxPlayers or info.maxPlayers) or tonumber(Players.MaxPlayers) or 12
+                            if type(rawServerNow) == "number" then
+                                observeServerAgeRawRow(rawAgeSnapshot, jobId, count, maxPlayers, rawServerNow)
+                            end
+                            if count >= 3 and count <= 6 then
+                                rememberTarget({id=tostring(jobId), playing=count, maxPlayers=maxPlayers})
+                            end
+                        end
+                    end
+                end
+                if pageHadRows then state.nativeBrowserGoodPage = tonumber(item.page) end
+            else
+                nativeErrors = nativeErrors + 1
+            end
+        end
+        if pending > 0 then nativeErrors = nativeErrors + pending end
+
+        state.serverAgeRawObservedAt = nowUnix
+        publishServerAgeRawSnapshot(rawAgeSnapshot, "hop-native-refresh")
+
+        -- Spread destinations across the live 3-6 pool instead of always taking the same order.
+        if #queue > 1 then shuffleServers(queue) end
+    end
+
+    -- Emergency public API fallback. Keep it deliberately short; we already know the Asc side
+    -- can contain hundreds of 1-player rows, so never block hopping on a long cursor crawl.
+    local apiPages, apiRows = 0, 0
+    if #queue == 0 and nativeRows == 0 then
+        local cursor = ""
+        local maxApiPages = 1
+        for page=1,maxApiPages do
+            local suffix = ""
+            if cursor ~= "" then
+                local encoded = cursor
+                pcall(function() encoded = HttpService:UrlEncode(cursor) end)
+                suffix = "&cursor=" .. encoded
+            end
+            local url = string.format("https://games.roblox.com/v1/games/%s/servers/0?sortOrder=1&excludeFullGames=true&limit=100%s", tostring(game.PlaceId), suffix)
+            local body = httpGetBody(url)
+            if not body then break end
+            local ok, decoded = pcall(function() return HttpService:JSONDecode(body) end)
+            if not ok or type(decoded) ~= "table" then break end
+            apiPages = apiPages + 1
+            local data = decoded.data or {}
+            apiRows = apiRows + #data
+            for _,raw in ipairs(data) do
+                local p = tonumber(raw and raw.playing) or 0
+                if p >= 3 and p <= 6 then
+                    local normalizedRaw = {id=tostring(raw.id or ""), playing=p, maxPlayers=tonumber(raw.maxPlayers) or 12}
+                    rememberTarget(normalizedRaw)
+                end
+            end
+            if #queue >= maxCandidates then break end
+            cursor = tostring(decoded.nextPageCursor or "")
+            if cursor == "" or cursor == "nil" then break end
+            -- Stop early when this side is still entirely 1-player; don't waste seconds.
+            local anyAboveOne = false
+            for _,raw in ipairs(data) do if (tonumber(raw.playing) or 0) > 1 then anyAboveOne=true break end end
+            if page >= 2 and not anyAboveOne then break end
+        end
+    end
+
+    -- If all fresh 3-6 servers are in visit cooldown, relax only the visit age. This keeps
+    -- hopping continuous without ever dropping to 1-2 player destinations.
+    if #queue == 0 and #targetRowsAll > 0 then
+        seen = {}
+        for _,raw in ipairs(targetRowsAll) do
+            if addServer(raw, 600) and #queue >= queueTarget then break end
+        end
+        if #queue == 0 then
+            seen = {}
+            for _,raw in ipairs(targetRowsAll) do
+                if addServer(raw, 180) and #queue >= queueTarget then break end
+            end
+        end
+        if #queue > 0 then executorLog("HOP", "3-6 visit cooldown relaxed to keep server-hop continuous") end
+    end
+
+    if #queue > 1 then shuffleServers(queue) end
+    while #queue > queueTarget do table.remove(queue) end
+
+    state.serverQueue = queue
+    state.serverQueueBuiltAt = (#queue > 0) and os.time() or state.serverQueueBuiltAt
+    state.serverQueueStrategy = HOP_QUEUE_STRATEGY
+    state.serverQueuePlaceId = currentPlaceId
+    saveRuntimeStateImmediate(state)
+
+    local result = {}
+    for i=1,math.min(maxCandidates,#queue) do result[#result+1] = queue[i] end
+    refreshServerAgeQueueStats(queue)
+    hopDebug(string.format(
+        "strategy=lowpop-3to6-instant-native-v81-r5 queue=%d selected=%d nativePages=%d nativeRows=%d native3to6=%d nativeErrors=%d apiPages=%d apiRows=%d goodPage=%s cooldown=%ss",
+        #queue, #result, nativePages, nativeRows, nativeTargetRows, nativeErrors, apiPages, apiRows,
+        tostring(state.nativeBrowserGoodPage), tostring(env.HopVisitedCooldown)
+    ))
+    return result
+end
+
+local function findUnvisitedServer()
+    local candidates = collectUnvisitedServers(1)
+    return candidates[1]
+end
+
+local function getQueueOnTeleport()
+    if type(queue_on_teleport) == "function" then return queue_on_teleport end
+    if type(queueonteleport) == "function" then return queueonteleport end
+    if type(syn) == "table" and type(syn.queue_on_teleport) == "function" then return syn.queue_on_teleport end
+    if type(fluxus) == "table" and type(fluxus.queue_on_teleport) == "function" then return fluxus.queue_on_teleport end
+    return nil
+end
+
+local function quoteLuaLongString(text)
+    text = tostring(text or "")
+    for eqCount = 6, 40 do
+        local eq = string.rep("=", eqCount)
+        local closeToken = "]" .. eq .. "]"
+        if not string.find(text, closeToken, 1, true) then
+            return "[" .. eq .. "[" .. text .. closeToken
+        end
+    end
+    return string.format("%q", text)
+end
+
+local function queueReloadAfterTeleport(preSpawnTarget)
+    local queuedAt = os.time()
+
+    -- FIX11: persistent one-hop state lets auto-exec restore toggles even if this
+    -- executor loses queue_on_teleport after several server hops.
+    if type(writefile) == "function" then
+        pcall(function()
+            writefile("PrimeHub_TeleportResume.json", HttpService:JSONEncode({
+                pending = true,
+                queuedAt = queuedAt,
+                placeId = game.PlaceId,
+                fromJobId = tostring(game.JobId or ""),
+                sniper = env.AutoFruitSniper == true,
+                hop = env.AutoHop == true,
+                esp = env.FruitESP == true,
+                serverOnly = env.OnlyServerSpawnedFruits == true,
+                preSpawnTargetJobId = tostring(preSpawnTarget and preSpawnTarget.id or ""),
+                preSpawnStartedAt = tonumber(preSpawnTarget and preSpawnTarget.startedAt) or 0,
+                preSpawnExpectedAt = tonumber(preSpawnTarget and preSpawnTarget.expectedAt) or 0,
+            }))
+        end)
+    end
+
+    local queueFn = getQueueOnTeleport()
+    if not queueFn then
+        AddLog("queue_on_teleport unavailable; relying on auto-exec + resume file.", Color3.fromRGB(255, 200, 0))
+        executorLog("WARN", "queue_on_teleport unavailable; persistent resume file written")
+        return false
+    end
+
+    local selfSource = env.PrimeHubSelfSource
+    if type(selfSource) ~= "string" or #selfSource < 10000 then
+        local message = "Self-contained test source missing in memory; refusing hop so the test does not silently die."
+        executorLog("ERROR", message .. " bytes=" .. tostring(type(selfSource) == "string" and #selfSource or -1))
+        AddLog(message, Color3.fromRGB(255, 100, 100))
+        return false
+    end
+
+    local sourceLiteral = quoteLuaLongString(selfSource)
+    local teleportPayload = nil
+
+    -- Many executors are much more reliable with a ~1KB queued loader than a
+    -- 200KB+ embedded payload. Cache the current DEV runtime to disk when possible.
+    if type(writefile) == "function" and type(readfile) == "function" then
+        local cacheOk = pcall(function()
+            writefile("PrimeHub_Runtime_8_2.lua", selfSource)
+        end)
+        if cacheOk then
+            teleportPayload = string.format([==[
+local __primeEnv = (type(getgenv) == "function" and getgenv()) or _G
+__primeEnv.PrimeHubTeleportResume = true
+__primeEnv.PrimeHubResumeAutoFruitSniper = %s
+__primeEnv.PrimeHubResumeAutoHop = %s
+__primeEnv.PrimeHubResumeFruitESP = %s
+__primeEnv.PrimeHubResumeOnlyServerSpawnedFruits = %s
+__primeEnv.PrimeHubResumeHopQueuedAt = %d
+__primeEnv.PrimeHubResumePreSpawnTargetJobId = %q
+__primeEnv.PrimeHubResumePreSpawnStartedAt = %.6f
+__primeEnv.PrimeHubResumePreSpawnExpectedAt = %.6f
+pcall(function() if not game:IsLoaded() then game.Loaded:Wait() end end)
+local __ok, __src = pcall(readfile, "PrimeHub_Runtime_8_2.lua")
+if not __ok or type(__src) ~= "string" or #__src < 10000 then
+    warn("[PrimeHub 8.2] File-backed queued runtime unavailable; waiting for auto-exec.")
+    return
+end
+__primeEnv.PrimeHubSelfSource = __src
+local __fn, __err = loadstring(__src)
+if not __fn then
+    warn("[PrimeHub 8.2] File-backed queued runtime compile failed: " .. tostring(__err))
+    return
+end
+return __fn()
+]==],
+                tostring(env.AutoFruitSniper == true),
+                tostring(env.AutoHop == true),
+                tostring(env.FruitESP == true),
+                tostring(env.OnlyServerSpawnedFruits == true),
+                queuedAt,
+                tostring(preSpawnTarget and preSpawnTarget.id or ""),
+                tonumber(preSpawnTarget and preSpawnTarget.startedAt) or 0,
+                tonumber(preSpawnTarget and preSpawnTarget.expectedAt) or 0
+            )
+            executorLog("PERF", "using small file-backed teleport loader")
+        end
+    end
+
+    if not teleportPayload then
+        teleportPayload = string.format([==[
+local __primeEnv = (type(getgenv) == "function" and getgenv()) or _G
+local __jobKey = tostring(game.PlaceId or "") .. ":" .. tostring(game.JobId or "")
+local __queueGuard = "PrimeHub-8.2-PUBLIC-QUEUE:" .. __jobKey
+if __primeEnv.PrimeHubSpeedQueuedGuard == __queueGuard then
+    print("[PrimeHub 8.2] Duplicate queued bootstrap ignored before runtime load for JobId=" .. tostring(game.JobId))
+    return
+end
+__primeEnv.PrimeHubSpeedQueuedGuard = __queueGuard
+__primeEnv.PrimeHubTeleportResume = true
+__primeEnv.PrimeHubResumeAutoFruitSniper = %s
+__primeEnv.PrimeHubResumeAutoHop = %s
+__primeEnv.PrimeHubResumeFruitESP = %s
+__primeEnv.PrimeHubResumeOnlyServerSpawnedFruits = %s
+__primeEnv.PrimeHubResumeHopQueuedAt = %d
+__primeEnv.PrimeHubResumePreSpawnTargetJobId = %q
+__primeEnv.PrimeHubResumePreSpawnStartedAt = %.6f
+__primeEnv.PrimeHubResumePreSpawnExpectedAt = %.6f
+
+local __src = %s
+__primeEnv.PrimeHubSelfSource = __src
+print("[PrimeHub 8.2] Self-contained teleport runtime received bytes=" .. tostring(#__src))
+local __fn, __err = loadstring(__src)
+if not __fn then
+    warn("[PrimeHub 8.2] Queued runtime compile failed: " .. tostring(__err))
+    return
+end
+return __fn()
+]==],
+        tostring(env.AutoFruitSniper == true),
+        tostring(env.AutoHop == true),
+        tostring(env.FruitESP == true),
+        tostring(env.OnlyServerSpawnedFruits == true),
+        queuedAt,
+        tostring(preSpawnTarget and preSpawnTarget.id or ""),
+        tonumber(preSpawnTarget and preSpawnTarget.startedAt) or 0,
+        tonumber(preSpawnTarget and preSpawnTarget.expectedAt) or 0,
+        sourceLiteral
+    )
+    end
+
+    executorLog("PERF", string.format(
+        "queue payload prepared runtimeBytes=%d payloadBytes=%d",
+        #selfSource, #teleportPayload
+    ))
+
+    local ok, err = pcall(queueFn, teleportPayload)
+    if ok then
+        print(string.format(
+            "[PrimeHub] PrimeHub 8.2 SELF-CONTAINED payload queued. resume sniper=%s hop=%s esp=%s serverOnly=%s runtimeBytes=%d payloadBytes=%d",
+            tostring(env.AutoFruitSniper == true), tostring(env.AutoHop == true), tostring(env.FruitESP == true),
+            tostring(env.OnlyServerSpawnedFruits == true), #selfSource, #teleportPayload
+        ))
+        return true
+    end
+    executorLog("ERROR", "queue_on_teleport rejected self-contained payload: " .. tostring(err))
+    AddLog("Failed to queue PrimeHub 8.0 teleport payload: " .. tostring(err), Color3.fromRGB(255, 100, 100))
+    return false
+end
+
+local function shortJobId()
+    return string.sub(tostring(game.JobId or "--------"), 1, 8)
+end
+
+local function isRecognizedFruitName(name)
+    return type(name) == "string" and FruitMetadata[name] ~= nil
+end
+
+local function looksLikeFruitName(name)
+    if type(name) ~= "string" or name == "" then return false end
+    if isRecognizedFruitName(name) then return true end
+    return string.find(name, "Fruit", 1, true) ~= nil
+end
+
+local function isTargetFruitName(name)
+    -- PrimeHub 7.9: SniperAllFruits means ALL fruit-looking names, not only entries
+    -- recovered in the old FruitMetadata table. The shortlist is still respected
+    -- when SniperAllFruits is explicitly disabled.
+    if env.SniperAllFruits then
+        return looksLikeFruitName(name)
+    end
+    return TargetFruitNames[name] == true
+end
+
+local function isServerWorldFruitModel(instance)
+    if not instance or not instance.Parent or not instance:IsA("Model") then return false end
+
+    local okDesc, inWorkspace = pcall(function()
+        return instance:IsDescendantOf(workspace)
+    end)
+    if not okDesc or not inWorkspace then return fals
