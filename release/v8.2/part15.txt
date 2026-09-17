@@ -1,0 +1,297 @@
+ return workspace:GetDescendants() end)
+                                if okObjects2 and type(objects2) == "table" then
+                                    for _, obj2 in ipairs(objects2) do
+                                        if obj2:IsA("Tool")
+                                            and obj2.Parent
+                                            and not isInsidePlayerCharacter(obj2)
+                                            and isFruitLikeTool(obj2)
+                                            and getDroppedFruitPart(obj2)
+                                            and not (env.PrimeHubPS.preSpawnBaselineTools and env.PrimeHubPS.preSpawnBaselineTools[obj2])
+                                        then
+                                            if isPlayerDroppedFruit(obj2) then
+                                                env.PrimeHubPS.rejectedPlayerDrops = env.PrimeHubPS.rejectedPlayerDrops or setmetatable({}, {__mode="k"})
+                                                if not env.PrimeHubPS.rejectedPlayerDrops[obj2] then
+                                                    env.PrimeHubPS.rejectedPlayerDrops[obj2] = true
+                                                    executorLog("EVENT", string.format(
+                                                        "PRESPAWN RECOVERY REJECT player-drop tool=%s",
+                                                        tostring(obj2.Name)
+                                                    ))
+                                                end
+                                            else
+                                                env.PrimeHubPS.recoveredTools[obj2] = true
+                                                cleanupFlight()
+                                                fruitDetected = true
+                                                executorLog("EVENT", string.format(
+                                                    "PRESPAWN FRUIT RECOVERED during-flight tool=%s",
+                                                    tostring(obj2.Name)
+                                                ))
+                                                processFruit(obj2)
+                                                recovered = obj2
+                                                break
+                                            end
+                                        end
+                                    end
+                                end
+                                if recovered then break end
+
+                                local root = getPlayerRoot()
+                                if root and (root.Position - recoveryPos).Magnitude <= 8 then
+                                    task.wait(0.15)
+                                else
+                                    if not applyFlight(recoveryPos, tonumber(env.TweenSpeed) or 230) then break end
+                                    task.wait(0.1)
+                                end
+                            end
+                            cleanupFlight()
+                        end
+                    end
+
+                    if not recovered then
+                        executorLog("EVENT", string.format(
+                            "PRESPAWN FRUIT RECOVERY MISS event=%d search=%.1fs pos=%s",
+                            eventId, math.max(1, tonumber(env.PrimeHubPS.cfg.recoverySearchSeconds) or 5),
+                            typeof(recoveryPos) == "Vector3" and "captured" or "missing"
+                        ))
+                    end
+                end
+            end
+        end)
+    end
+
+    connection = signal:Connect(handleWorldDrop)
+    local existingCount = 0
+    local okExisting, existing = pcall(function() return CollectionService:GetTagged("WORLD_DROP") end)
+    if okExisting and type(existing) == "table" then
+        existingCount = #existing
+        for _, instance in ipairs(existing) do
+            monitorWorldDropLifecycle(instance, "startup-existing")
+        end
+    end
+    executorLog("EVENT", "WORLD_DROP listener active existingTagged=" .. tostring(existingCount))
+
+    while runtimeActive() do task.wait(1) end
+    if connection then connection:Disconnect() end
+end
+
+local function autoHopWorker()
+    local elapsed = 0
+    while runtimeActive() do
+        task.wait(1)
+        if not runtimeActive() then break end
+
+        if env.PrimeHubPS.isHoldActive() then
+            elapsed = 0
+            if statusLabel then statusLabel.Text = "PRESPAWN • HOLD" end
+            if math.floor(env.PrimeHubPS.holdRemaining()) % 5 == 0 then
+                executorLog("HOP", string.format(
+                    "PRESPAWN HOLD active remaining=%s",
+                    formatMS(env.PrimeHubPS.holdRemaining())
+                ))
+            end
+        elseif env.AutoHop and not env.HoldingHighTierFruit and not hopping then
+            local fruits, autoHopStats = scanWorkspaceForFruits()
+            fruitDetected = #fruits > 0
+            local worldDropPending = autoHopStats
+                and (tonumber(autoHopStats.pendingWorldDrops) or 0) > 0
+
+            if fruitDetected or processingFruit or worldDropPending then
+                elapsed = 0
+            else
+                local now = tick()
+
+                if postFruitHopDeadline ~= nil then
+                    if now >= postFruitHopDeadline then
+                        postFruitHopDeadline = nil
+                        AddLog("Fast hop triggered", Color3.fromRGB(0, 200, 255))
+                        if ServerHop() then return end
+                        local retryDelay = math.max(1, tonumber(env.HopNoCandidateDelay) or 2)
+                        postFruitHopDeadline = tick() + retryDelay
+                        executorLog("HOP", "fast retry scheduled in " .. tostring(retryDelay) .. "s")
+                        elapsed = 0
+                    end
+                else
+                    elapsed = elapsed + 1
+                    local interval = math.max(5, tonumber(env.AutoHopInterval) or 30)
+                    if elapsed >= interval then
+                        AddLog("Auto-hop timer triggered (" .. tostring(interval) .. "s)", Color3.fromRGB(0, 200, 255))
+                        if ServerHop() then return end
+                        local retryDelay = math.max(1, tonumber(env.HopNoCandidateDelay) or 2)
+                        postFruitHopDeadline = tick() + retryDelay
+                        executorLog("HOP", "fast retry scheduled in " .. tostring(retryDelay) .. "s")
+                        elapsed = 0
+                    end
+                end
+            end
+        else
+            elapsed = 0
+        end
+    end
+end
+
+local function statusMonitorWorker()
+    while runtimeActive() do
+        task.wait(2)
+
+        local lateTeleportPrompt = observeTeleportErrorPrompt()
+        if lateTeleportPrompt
+            and env.AutoHop
+            and not env.HoldingHighTierFruit
+            and not env.PrimeHubPS.isHoldActive()
+            and not hopping
+            and type(ServerHop) == "function"
+        then
+            executorLog("WARN", "late Roblox teleport prompt detected; scheduling retry: " .. tostring(lateTeleportPrompt))
+            task.spawn(function()
+                task.wait(math.max(0.5, tonumber(env.HopRetryDelay) or 2))
+                if runtimeActive() and env.AutoHop and not hopping then
+                    ServerHop()
+                end
+            end)
+        end
+
+        if subStatus then
+            if env.PrimeHubPS.isHoldActive() then
+                local timing = currentServerTiming()
+                subStatus.Text = string.format(
+                    "PRESPAWN HOLD • Job %s • Spawn %s • Release %s",
+                    shortJobId(),
+                    timing and formatMS(timing.untilSpawn) or "--:--",
+                    formatMS(env.PrimeHubPS.holdRemaining())
+                )
+            else
+                subStatus.Text = string.format(
+                    "Server: %s | Hops: %d | Fruits: %d",
+                    shortJobId(), hopCount, fruitCount
+                )
+            end
+        end
+    end
+end
+
+local function getESPHandle(child)
+    return getDroppedFruitPart(child)
+end
+
+local function destroyFruitESP()
+    for _, child in ipairs(workspace:GetChildren()) do
+        local handle = getDroppedFruitPart(child)
+        local marker = handle and handle:FindFirstChild("PrimeHub_ESP")
+        if marker then pcall(function() marker:Destroy() end) end
+    end
+end
+
+local function createFruitESP(fruit)
+    local handle = getESPHandle(fruit)
+    if not handle or handle:FindFirstChild("PrimeHub_ESP") then return end
+
+    local folder = Instance.new("Folder", handle)
+    folder.Name = "PrimeHub_ESP"
+
+    local billboard = Instance.new("BillboardGui", folder)
+    billboard.Name = "FruitBillboard"
+    billboard.Adornee = handle
+    billboard.Size = UDim2.new(0, 140, 0, 40)
+    billboard.StudsOffset = Vector3.new(0, 2, 0)
+    billboard.AlwaysOnTop = true
+
+    local label = Instance.new("TextLabel", billboard)
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.fromRGB(255, 80, 80)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 11
+    label.TextStrokeTransparency = 0.4
+
+    task.spawn(function()
+        while runtimeActive() and env.FruitESP and label.Parent and handle.Parent do
+            local root = getPlayerRoot()
+            if root then
+                local distance = math.floor((root.Position - handle.Position).Magnitude)
+                local displayName = isServerWorldFruitModel(fruit) and "SERVER FRUIT" or tostring(fruit.Name)
+                label.Text = displayName .. " (" .. tostring(distance) .. "m)"
+            end
+            task.wait(1)
+        end
+        if folder and folder.Parent then pcall(function() folder:Destroy() end) end
+    end)
+end
+
+local function fruitESPWorker()
+    local wasEnabled = false
+    while runtimeActive() do
+        if env.FruitESP then
+            wasEnabled = true
+            for _, child in ipairs(scanWorkspaceForFruits()) do
+                pcall(function() createFruitESP(child) end)
+            end
+        elseif wasEnabled then
+            destroyFruitESP()
+            wasEnabled = false
+        end
+        task.wait(1)
+    end
+    destroyFruitESP()
+end
+
+local function startWorkers()
+    executorLog("PERF", string.format("workers starting bootElapsed=%.2fs", tick() - PRIMEHUB_BOOT_TICK))
+    local __selfBytes = type(env.PrimeHubSelfSource) == "string" and #env.PrimeHubSelfSource or -1
+    executorLog("PERF", "self-contained runtime source bytes=" .. tostring(__selfBytes))
+    if __resumeHopTransitSeconds then
+        executorLog("PERF", "teleport-to-runtime transit=" .. tostring(__resumeHopTransitSeconds) .. "s")
+    end
+    task.spawn(worldDropEventWorker)
+    task.spawn(fruitESPWorker)
+    task.spawn(deepScanWorker)
+    task.spawn(autoHopWorker)
+    task.spawn(periodicSniperWorker)
+    task.spawn(statusMonitorWorker)
+end
+
+local function initializeRuntime()
+    local state = initializeCountersFromState()
+    local learned, learnInfo = learnCurrentServerAge()
+    if learned then
+        AddLog(string.format("[DEV] Server age learned: %s | Job %s", formatHMS(learnInfo.ageAtLastSeen), string.sub(tostring(game.JobId),1,8)), Color3.fromRGB(130, 220, 255))
+        local preSpawnHoldStarted = env.PrimeHubPS.initHoldFromResume()
+        if preSpawnHoldStarted then
+            local teamOk, teamResult = ensureTeamReady("pre-spawn arrival", env.PreferredTeam or "Pirates")
+            if teamOk then
+                executorLog("TEAM", string.format(
+                    "PRESPAWN TEAM READY team=%s root=%s",
+                    tostring(currentTeamName()), tostring(teamResult)
+                ))
+                AddLog("[DEV] Pre-spawn team selected immediately: " .. tostring(currentTeamName()),
+                    Color3.fromRGB(120, 255, 160))
+            else
+                executorLog("TEAM", string.format(
+                    "PRESPAWN TEAM FAILED reason=%s",
+                    tostring(teamResult)
+                ))
+                AddLog("[DEV] Pre-spawn team selection failed; will retry during fruit recovery.",
+                    Color3.fromRGB(255, 190, 90))
+            end
+        end
+    else
+        AddLog("[DEV] Server age unavailable: " .. tostring(learnInfo), Color3.fromRGB(255, 200, 100))
+    end
+    AddLog("[PrimeHub] Starting v8.2", Color3.fromRGB(209, 105, 255))
+    AddLog(
+        string.format("[PrimeHub] Visited servers: %d | Hops: %d | Fruits: %d", #(state.servers or {}), hopCount, fruitCount),
+        Color3.fromRGB(169, 76, 255)
+    )
+    AddLog("[PrimeHub] Stable sniper core ready.", Color3.fromRGB(130, 255, 180))
+    return state
+end
+
+local PRIMEHUB_ART_FILE = "PrimeHub_cat-girl.png"
+local PRIMEHUB_ART_URL = tostring(env.PrimeHubArtUrl or "https://raw.githubusercontent.com/softiksun5-hue/PrimeHub/main/assets/cat-girl.b64")
+-- PrimeHub 8.0 omits the large embedded PNG from the teleport runtime.
+-- UI reuses PrimeHub_cat-girl.png if present or fetches PRIMEHUB_ART_URL asynchronously.
+local PRIMEHUB_ART_EMBEDDED_B64 = "" -- stripped to keep queued payload small
+local function decodePrimeHubBase64(data)
+    -- Prefer the executor's native decoder when available.
+    local candidates = {}
+    pcall(function()
+        if type(crypt) == "table" then
+            if type(crypt.base64decode) == "function" then candidates[#candidates+1] = crypt.bas
