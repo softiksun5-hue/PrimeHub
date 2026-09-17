@@ -1,0 +1,529 @@
+local startedAt = select(1, findWorldTimeIn())
+    if not startedAt then
+        local rec = loadServerAgeCache().servers[tostring(game.JobId or "")]
+        startedAt = rec and tonumber(rec.startedAt) or nil
+    end
+    if not startedAt then return nil end
+
+    local ok, serverNow = pcall(function() return workspace:GetServerTimeNow() end)
+    if not ok or type(serverNow) ~= "number" then return nil end
+    local age = math.max(0, serverNow - startedAt)
+    local phase = age % 3600
+    local untilSpawn = (3600 - phase) % 3600
+    return {startedAt=startedAt, now=serverNow, age=age, phase=phase, untilSpawn=untilSpawn}
+end
+
+local function formatHMS(seconds)
+    seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+    local h = math.floor(seconds / 3600)
+    local m = math.floor((seconds % 3600) / 60)
+    local s = seconds % 60
+    return string.format("%02d:%02d:%02d", h, m, s)
+end
+
+local function formatMS(seconds)
+    seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+    return string.format("%02d:%02d", math.floor(seconds / 60), seconds % 60)
+end
+
+local function learnCurrentServerAge()
+    local jobId = tostring(game.JobId or "")
+    if #jobId < 5 then return false, "no JobId" end
+
+    local startedAt, sourceName = findWorldTimeIn()
+    if not startedAt then return false, "TimeIn unavailable" end
+
+    local ok, serverNow = pcall(function() return workspace:GetServerTimeNow() end)
+    if not ok or type(serverNow) ~= "number" then return false, "server clock unavailable" end
+
+    local cache = loadServerAgeCache()
+    local servers = cache.servers
+    local rec = servers[jobId]
+    local isNew = type(rec) ~= "table"
+    rec = type(rec) == "table" and rec or {}
+    rec.jobId = jobId
+    rec.placeId = tostring(game.PlaceId or "")
+    rec.startedAt = tonumber(startedAt)
+    rec.lastSeenAt = tonumber(serverNow)
+    rec.players = #Players:GetPlayers()
+    rec.source = tostring(sourceName or "TimeIn")
+    rec.ageAtLastSeen = math.max(0, serverNow - startedAt)
+    rec.phaseAtLastSeen = rec.ageAtLastSeen % 3600
+    rec.visitedByPrimeHub = true
+    rec.visitCount = math.max(1, (tonumber(rec.visitCount) or 0) + 1)
+    servers[jobId] = rec
+
+    local items = {}
+    for id, item in pairs(servers) do
+        items[#items+1] = {id=id, lastSeenAt=tonumber(item.lastSeenAt) or 0}
+    end
+    if #items > SERVER_AGE_CACHE_MAX_ENTRIES then
+        table.sort(items, function(a,b) return a.lastSeenAt > b.lastSeenAt end)
+        for i=SERVER_AGE_CACHE_MAX_ENTRIES+1,#items do servers[items[i].id] = nil end
+    end
+
+    local n = 0
+    for _ in pairs(servers) do n += 1 end
+    serverAgeCacheStats.entries = n
+    serverAgeCacheStats.currentKnown = true
+    saveServerAgeCache()
+
+    executorLog("HOP", string.format(
+        "server-age learn job=%s startedAt=%.3f age=%ss phase=%ss players=%d cache=%d new=%s source=%s",
+        string.sub(jobId,1,8), startedAt, math.floor(rec.ageAtLastSeen), math.floor(rec.phaseAtLastSeen), rec.players,
+        n, tostring(isNew), tostring(rec.source)
+    ))
+    return true, rec
+end
+
+local function refreshServerAgeQueueStats(queue)
+    local cache = loadServerAgeCache()
+    local known, total = 0, 0
+    local placeId = tostring(game.PlaceId or "")
+    local now = os.time()
+    local seen = {}
+    for _, server in ipairs(type(queue) == "table" and queue or {}) do
+        local id = tostring(server and (server.id or server.JobId or server.jobId) or "")
+        if #id >= 5 and not seen[id] then
+            seen[id] = true
+            total += 1
+            local rec = cache.servers[id]
+            if type(rec) == "table"
+                and tostring(rec.placeId or "") == placeId
+                and tonumber(rec.startedAt)
+                and (now - (tonumber(rec.lastSeenAt) or 0)) <= SERVER_AGE_CACHE_MAX_AGE then
+                known += 1
+            end
+        end
+    end
+    serverAgeCacheStats.knownInQueue = known
+    serverAgeCacheStats.totalInQueue = total
+    serverAgeCacheStats.entries = serverAgeCacheStats.entries or 0
+    executorLog("HOP", string.format("server-age learning queueKnown=%d/%d cacheEntries=%d", known, total, serverAgeCacheStats.entries))
+end
+
+
+local refreshServerTimingUI
+
+-- DEV PRE-SPAWN TARGETING ----------------------------------------------------
+env.PrimeHubPS = env.PrimeHubPS or {}
+env.PrimeHubPS.cfg = env.PrimeHubPS.cfg or {
+    targetMin = 20,
+    targetMax = 35,
+    targetCooldown = 120,
+    postBoundaryGrace = 15,
+    arrivalAcceptAfter = 18,
+    authoritativeBefore = 3,
+    authoritativeAfter = 8,
+    recoverySearchSeconds = 5,
+    recoveryMaxDistance = 120,
+}
+env.PrimeHubPS.candidate = nil
+env.PrimeHubPS.recoveredTools = env.PrimeHubPS.recoveredTools or setmetatable({}, {__mode="k"})
+env.PrimeHubPS.preSpawnBaselineTools = nil
+env.PrimeHubPS.authoritativeDrop = nil
+env.PrimeHubPS.hold = env.PrimeHubPS.hold or {
+    active = false,
+    targetJobId = "",
+    startedAt = 0,
+    boundaryAt = 0,
+    releaseAt = 0,
+    acquiredAt = 0,
+    releasedLogged = false,
+}
+
+env.PrimeHubPS.isCooling = function(jobId)
+    jobId = tostring(jobId or "")
+    if jobId == "" then return false end
+    local state = loadRuntimeState()
+    local now = os.time()
+    local untilTs = tonumber(state.preSpawnTargetCooldowns and state.preSpawnTargetCooldowns[jobId]) or 0
+    return untilTs > now
+end
+
+env.PrimeHubPS.markCooldown = function(jobId, seconds)
+    jobId = tostring(jobId or "")
+    if jobId == "" then return end
+    local state = loadRuntimeState()
+    state.preSpawnTargetCooldowns = type(state.preSpawnTargetCooldowns) == "table" and state.preSpawnTargetCooldowns or {}
+    local now = os.time()
+    for id, untilTs in pairs(state.preSpawnTargetCooldowns) do
+        if (tonumber(untilTs) or 0) <= now then
+            state.preSpawnTargetCooldowns[id] = nil
+        end
+    end
+    state.preSpawnTargetCooldowns[jobId] =
+        now + math.max(30, tonumber(seconds) or env.PrimeHubPS.cfg.targetCooldown)
+    saveRuntimeStateImmediate(state)
+end
+
+env.PrimeHubPS.holdRemaining = function()
+    local hold = env.PrimeHubPS.hold
+    if not hold.active then return 0 end
+    local ok, serverNow = pcall(function() return workspace:GetServerTimeNow() end)
+    if not ok or type(serverNow) ~= "number" then
+        return math.max(0, hold.releaseAt - os.time())
+    end
+    return math.max(0, hold.releaseAt - serverNow)
+end
+
+env.PrimeHubPS.isHoldActive = function()
+    local hold = env.PrimeHubPS.hold
+    if not hold.active then return false end
+    local remaining = env.PrimeHubPS.holdRemaining()
+    if remaining > 0 then return true end
+    hold.active = false
+    if not hold.releasedLogged then
+        hold.releasedLogged = true
+        executorLog("HOP", string.format(
+            "PRESPAWN RELEASE job=%s grace=%ss",
+            string.sub(tostring(hold.targetJobId or ""), 1, 8),
+            tostring(env.PrimeHubPS.cfg.postBoundaryGrace)
+        ))
+        AddLog("[DEV] Pre-spawn hold released; normal hopping resumed.", Color3.fromRGB(120, 220, 255))
+    end
+    return false
+end
+
+env.PrimeHubPS.initHoldFromResume = function()
+    local currentJob = tostring(game.JobId or "")
+    if env.__PrimeHubPSResumeTargetJobId == "" or currentJob ~= env.__PrimeHubPSResumeTargetJobId then
+        return false
+    end
+
+    local ok, serverNow = pcall(function() return workspace:GetServerTimeNow() end)
+    if not ok or type(serverNow) ~= "number" then return false end
+
+    local startedAt = tonumber(env.__PrimeHubPSResumeStartedAt) or 0
+    if startedAt <= 0 then
+        local timing = currentServerTiming()
+        startedAt = timing and tonumber(timing.startedAt) or 0
+    end
+    if startedAt <= 0 then return false end
+
+    local age = math.max(0, serverNow - startedAt)
+    local phase = age % 3600
+    local untilSpawn = (3600 - phase) % 3600
+    local boundaryAt
+
+    if phase <= env.PrimeHubPS.cfg.arrivalAcceptAfter then
+        boundaryAt = serverNow - phase
+    else
+        boundaryAt = serverNow + untilSpawn
+    end
+
+    local hold = env.PrimeHubPS.hold
+    hold.active = true
+    hold.targetJobId = currentJob
+    hold.startedAt = startedAt
+    hold.boundaryAt = boundaryAt
+    hold.releaseAt = boundaryAt + env.PrimeHubPS.cfg.postBoundaryGrace
+    hold.acquiredAt = serverNow
+    hold.releasedLogged = false
+
+    env.PrimeHubPS.preSpawnBaselineTools = setmetatable({}, {__mode="k"})
+    env.PrimeHubPS.rejectedPlayerDrops = setmetatable({}, {__mode="k"})
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("Tool") then
+                env.PrimeHubPS.preSpawnBaselineTools[obj] = true
+            end
+        end
+    end)
+    env.PrimeHubPS.authoritativeDrop = nil
+    env.PrimeHubPS.authoritativeFlightLogged = false
+
+    executorLog("HOP", string.format(
+        "PRESPAWN HOLD job=%s phase=%s spawnIn=%s releaseIn=%s transit=%ss",
+        string.sub(currentJob,1,8), formatMS(phase), formatMS(untilSpawn),
+        formatMS(math.max(0, hold.releaseAt - serverNow)),
+        tostring(__resumeHopTransitSeconds or "?")
+    ))
+    AddLog(
+        string.format(
+            "[DEV] Pre-spawn target reached. Holding server until spawn + %ss.",
+            env.PrimeHubPS.cfg.postBoundaryGrace
+        ),
+        Color3.fromRGB(255, 210, 90)
+    )
+    return true
+end
+-- END DEV PRE-SPAWN TARGETING ------------------------------------------------
+
+-- DEV RAW SERVER-BROWSER OBSERVER --------------------------------------------
+-- Counts known JobIds BEFORE visited/cooldown/current-server filtering.
+-- This is observation-only: it never changes hop selection.
+local SERVER_AGE_PRESPAWN_MIN = 20
+local SERVER_AGE_PRESPAWN_MAX = 35
+local SERVER_AGE_RAW_OBSERVER_INTERVAL = 45
+local serverAgeRawObserverBusy = false
+
+local function newServerAgeRawSnapshot()
+    return {
+        seen = {},
+        rawTotal = 0,
+        rawKnown = 0,
+        lowpopTotal = 0,
+        lowpopKnown = 0,
+        preSpawnKnown = 0,
+        preSpawnLowpop = 0,
+        preSpawn = {},
+    }
+end
+
+local function observeServerAgeRawRow(snapshot, jobId, playing, maxPlayers, serverNow)
+    jobId = tostring(jobId or "")
+    if #jobId < 5 or snapshot.seen[jobId] then return end
+    snapshot.seen[jobId] = true
+
+    playing = tonumber(playing) or 0
+    maxPlayers = tonumber(maxPlayers) or tonumber(Players.MaxPlayers) or 12
+    snapshot.rawTotal += 1
+    if playing >= 3 and playing <= 6 then
+        snapshot.lowpopTotal += 1
+    end
+
+    local rec = loadServerAgeCache().servers[jobId]
+    if type(rec) ~= "table" then return end
+    if rec.visitedByPrimeHub ~= true then return end
+    if tostring(rec.placeId or "") ~= tostring(game.PlaceId or "") then return end
+
+    local startedAt = tonumber(rec.startedAt)
+    local lastSeenAt = tonumber(rec.lastSeenAt) or 0
+    if not startedAt or startedAt <= 0 then return end
+    if serverNow - lastSeenAt > SERVER_AGE_CACHE_MAX_AGE then return end
+
+    snapshot.rawKnown += 1
+    local isLowpop = playing >= 3 and playing <= 6
+    if isLowpop then snapshot.lowpopKnown += 1 end
+
+    local age = math.max(0, serverNow - startedAt)
+    local phase = age % 3600
+    local untilSpawn = (3600 - phase) % 3600
+    local inWindow = untilSpawn >= SERVER_AGE_PRESPAWN_MIN and untilSpawn <= SERVER_AGE_PRESPAWN_MAX
+
+    if inWindow then
+        snapshot.preSpawnKnown += 1
+        if isLowpop then snapshot.preSpawnLowpop += 1 end
+        snapshot.preSpawn[#snapshot.preSpawn + 1] = {
+            id = jobId,
+            playing = playing,
+            maxPlayers = maxPlayers,
+            age = age,
+            phase = phase,
+            untilSpawn = untilSpawn,
+            lowpop = isLowpop,
+            lastSeenAt = lastSeenAt,
+            visitCount = tonumber(rec.visitCount) or 1,
+            visitedByPrimeHub = true,
+        }
+    end
+end
+
+local function publishServerAgeRawSnapshot(snapshot, source)
+    serverAgeCacheStats.rawTotal = snapshot.rawTotal
+    serverAgeCacheStats.rawKnown = snapshot.rawKnown
+    serverAgeCacheStats.lowpopTotal = snapshot.lowpopTotal
+    serverAgeCacheStats.lowpopKnown = snapshot.lowpopKnown
+    serverAgeCacheStats.preSpawnKnown = snapshot.preSpawnKnown
+    serverAgeCacheStats.preSpawnLowpop = snapshot.preSpawnLowpop
+    serverAgeCacheStats.rawObservedAt = os.time()
+
+    executorLog("HOP", string.format(
+        "server-age RAW source=%s rawKnown=%d/%d lowpopKnown=%d/%d preSpawnAny=%d preSpawn3to6=%d cacheEntries=%d window=%d-%ds",
+        tostring(source or "?"),
+        snapshot.rawKnown, snapshot.rawTotal,
+        snapshot.lowpopKnown, snapshot.lowpopTotal,
+        snapshot.preSpawnKnown, snapshot.preSpawnLowpop,
+        tonumber(serverAgeCacheStats.entries) or 0,
+        SERVER_AGE_PRESPAWN_MIN, SERVER_AGE_PRESPAWN_MAX
+    ))
+
+    table.sort(snapshot.preSpawn, function(a,b)
+        local au = tonumber(a.untilSpawn) or 0
+        local bu = tonumber(b.untilSpawn) or 0
+        if math.abs(au - bu) > 0.05 then
+            return au > bu
+        end
+        local al = tonumber(a.lastSeenAt) or 0
+        local bl = tonumber(b.lastSeenAt) or 0
+        if al ~= bl then
+            return al > bl
+        end
+        return tostring(a.id or "") < tostring(b.id or "")
+    end)
+
+    local chosen = nil
+    for i = 1, math.min(8, #snapshot.preSpawn) do
+        local s = snapshot.preSpawn[i]
+        executorLog("HOP", string.format(
+            "PRESPAWN OBSERVED #%d job=%s players=%d/%d age=%s phase=%s spawnIn=%s visited=true visits=%d",
+            i, string.sub(s.id,1,8), s.playing, s.maxPlayers,
+            formatHMS(s.age), formatMS(s.phase), formatMS(s.untilSpawn), tonumber(s.visitCount) or 1
+        ))
+
+        local preSpawnEligible = (tonumber(s.playing) or 0) >= 0
+        if not chosen
+            and preSpawnEligible
+            and tostring(s.id) ~= tostring(game.JobId or "")
+            and not env.PrimeHubPS.isCooling(s.id)
+        then
+            chosen = s
+        end
+    end
+
+    if chosen then
+        local existing = env.PrimeHubPS.candidate
+        if existing
+            and tostring(existing.id or "") ~= ""
+            and not env.PrimeHubPS.isCooling(existing.id)
+        then
+            local existingUntil = tonumber(existing.untilSpawn) or 0
+            local chosenUntil = tonumber(chosen.untilSpawn) or 0
+            if existingUntil >= (env.PrimeHubPS.cfg.targetMin - 3)
+                and existingUntil <= (env.PrimeHubPS.cfg.targetMax + 2)
+            then
+                executorLog("HOP", string.format(
+                    "PRESPAWN TARGET LOCK keep=%s ignore=%s",
+                    string.sub(tostring(existing.id),1,8),
+                    string.sub(tostring(chosen.id),1,8)
+                ))
+                chosen = existing
+            end
+        end
+
+        env.PrimeHubPS.candidate = chosen
+        env.PrimeHubPS.priorityTargetActive = true
+        executorLog("HOP", string.format(
+            "PRESPAWN TARGET job=%s players=%d/%d spawnIn=%s age=%s source=VISITED_ONLY visits=%d",
+            string.sub(chosen.id,1,8), chosen.playing, chosen.maxPlayers,
+            formatMS(chosen.untilSpawn), formatHMS(chosen.age), tonumber(chosen.visitCount) or 1
+        ))
+        if type(env.PrimeHubPS.requestTargetNow) == "function" then
+            task.defer(function()
+                pcall(env.PrimeHubPS.requestTargetNow)
+            end)
+        end
+    end
+
+    refreshServerTimingUI()
+end
+
+local function runPassiveServerAgeRawObservation()
+    if serverAgeRawObserverBusy then return end
+    local browser = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    if not (browser and browser:IsA("RemoteFunction")) then return end
+
+    serverAgeRawObserverBusy = true
+    task.spawn(function()
+        local snapshot = newServerAgeRawSnapshot()
+        local okNow, serverNow = pcall(function() return workspace:GetServerTimeNow() end)
+        if not okNow or type(serverNow) ~= "number" then
+            serverAgeRawObserverBusy = false
+            return
+        end
+
+        local pending = 100
+        local results = {}
+        for page = 1, 100 do
+            task.spawn(function()
+                local ok, response = pcall(function()
+                    return browser:InvokeServer(page)
+                end)
+                results[#results + 1] = {ok=ok, response=response}
+                pending -= 1
+            end)
+        end
+
+        local deadline = os.clock() + math.max(1.0, math.min(4.0, tonumber(env.HopNativeBrowserBatchTimeout) or 2.2))
+        while pending > 0 and os.clock() < deadline do task.wait(0.02) end
+
+        for _, item in ipairs(results) do
+            if item.ok and type(item.response) == "table" then
+                for jobId, info in pairs(item.response) do
+                    if type(info) == "table" then
+                        local count = tonumber(info.Count or info.count or info.Playing or info.playing)
+                        if count then
+                            observeServerAgeRawRow(
+                                snapshot,
+                                jobId,
+                                count,
+                                tonumber(info.MaxPlayers or info.maxPlayers) or tonumber(Players.MaxPlayers) or 12,
+                                serverNow
+                            )
+                        end
+                    end
+                end
+            end
+        end
+
+        publishServerAgeRawSnapshot(snapshot, "passive-native")
+        serverAgeRawObserverBusy = false
+    end)
+end
+-- END DEV RAW SERVER-BROWSER OBSERVER ----------------------------------------
+
+refreshServerTimingUI = function()
+    local timing = currentServerTiming()
+    if serverAgeLabel then
+        serverAgeLabel.Text = timing and formatHMS(timing.age) or "--:--:--"
+    end
+    if subStatus and env.PrimeHubLicenseValid == true then
+        local fruitText = timing and formatMS(timing.untilSpawn) or "--:--"
+        if env.PrimeHubPS.isHoldActive() then
+            subStatus.Text = string.format(
+                "PRESPAWN HOLD • Job %s • Spawn %s • Release %s",
+                string.sub(tostring(game.JobId or "--------"),1,8),
+                fruitText,
+                formatMS(env.PrimeHubPS.holdRemaining())
+            )
+        else
+            subStatus.Text = string.format(
+                "Job: %s  •  Fruit: %s  •  Raw: %d/%d  •  Pre: %d",
+                string.sub(tostring(game.JobId or "--------"),1,8), fruitText,
+                tonumber(serverAgeCacheStats.rawKnown) or 0,
+                tonumber(serverAgeCacheStats.rawTotal) or 0,
+                tonumber(serverAgeCacheStats.preSpawnLowpop) or 0
+            )
+        end
+    end
+    if serverAgeCacheInfoLabel then
+        serverAgeCacheInfoLabel.Text = string.format(
+            "Cache %d  •  raw %d/%d  •  3-6 %d/%d  •  pre %d",
+            tonumber(serverAgeCacheStats.entries) or 0,
+            tonumber(serverAgeCacheStats.rawKnown) or 0,
+            tonumber(serverAgeCacheStats.rawTotal) or 0,
+            tonumber(serverAgeCacheStats.lowpopKnown) or 0,
+            tonumber(serverAgeCacheStats.lowpopTotal) or 0,
+            tonumber(serverAgeCacheStats.preSpawnLowpop) or 0
+        )
+    end
+end
+-- END DEV SERVER-AGE LEARNING -----------------------------------------------
+
+local function updateStats(newHops, newFruits)
+    if newHops ~= nil then
+        hopCount = tonumber(newHops) or 0
+    end
+    if newFruits ~= nil then
+        fruitCount = tonumber(newFruits) or 0
+    end
+
+    local state = loadRuntimeState()
+    state.hops = hopCount
+    state.fruits = fruitCount
+    state.speed = tonumber(env.TweenSpeed) or 230
+    saveRuntimeState(state)
+
+    if hopCountLabel then hopCountLabel.Text = tostring(hopCount) end
+    if fruitCountLabel then fruitCountLabel.Text = tostring(fruitCount) end
+end
+
+local function initializeCountersFromState()
+    local state = loadRuntimeState()
+    hopCount = tonumber(state.hops) or 0
+    fruitCount = tonumber(state.fruits) or 0
+    env.TweenSpeed = tonumber(state.speed) or tonumber(env.TweenSpeed) or 230
+    return state
+end
+
