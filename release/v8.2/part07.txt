@@ -346,4 +346,4 @@ local function scanWorkspaceForFruits(debugTag)
                             recoveryRemaining
                         )
                         local label = (recoveryOrigin == "recovering")
-                            and "SERVER 
+                            and "SERVER
