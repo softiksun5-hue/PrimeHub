@@ -1,0 +1,352 @@
+ype(getconnections) == "function" then
+            local signals = {}
+            pcall(function() signals[#signals + 1] = button.Activated end)
+            pcall(function() signals[#signals + 1] = button.MouseButton1Click end)
+            for _, signal in ipairs(signals) do
+                if signal then
+                    local okConnections, connections = pcall(getconnections, signal)
+                    if okConnections and type(connections) == "table" then
+                        for _, connection in ipairs(connections) do
+                            if type(connection) == "table" or type(connection) == "userdata" then
+                                local fn = nil
+                                pcall(function() fn = connection.Function end)
+                                if type(fn) == "function" then
+                                    pcall(fn)
+                                    fired = true
+                                else
+                                    local fire = nil
+                                    pcall(function() fire = connection.Fire end)
+                                    if type(fire) == "function" then
+                                        pcall(function() fire(connection) end)
+                                        fired = true
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        if fired then
+            teamDebug("GUI fallback fired button: " .. tostring(button:GetFullName()))
+            return true
+        end
+    end
+    return false
+end
+
+local function ensureTeamReady(reason, forceTeam)
+    local existingRoot = getPlayerRoot()
+    local existingTeam = currentTeamName()
+    if existingTeam and existingRoot then
+        return true, existingRoot
+    end
+
+    if not env.AutoTeam and not forceTeam then
+        teamDebug("AutoTeam disabled; team=" .. tostring(existingTeam) .. " root=" .. tostring(existingRoot))
+        return false, "auto_team_disabled"
+    end
+
+    if teamSelectionBusy then
+        teamDebug("Team selection already in progress; waiting...")
+        return waitForTeamCharacter(env.TeamReadyTimeout)
+    end
+
+    local now = tick()
+    if now - lastTeamAttempt < math.max(0.1, tonumber(env.TeamRetryDelay) or 0.75) then
+        task.wait(math.max(0.1, tonumber(env.TeamRetryDelay) or 0.75) - (now - lastTeamAttempt))
+    end
+
+    teamSelectionBusy = true
+    lastTeamAttempt = tick()
+
+    local preferred = forceTeam or env.PreferredTeam or "Pirates"
+    if preferred ~= "Marines" then preferred = "Pirates" end
+    env.PreferredTeam = preferred
+
+    teamDebug(string.format(
+        "Team required (%s). current=%s preferred=%s root=%s",
+        tostring(reason or "unknown"), tostring(existingTeam), tostring(preferred), tostring(existingRoot)
+    ))
+
+    local remoteOk, remoteResult = pcall(function()
+        return CommF_:InvokeServer("SetTeam", preferred)
+    end)
+    teamDebug(string.format("SetTeam remote ok=%s result=%s", tostring(remoteOk), tostring(remoteResult)))
+
+    -- The server normally assigns Team + Character shortly after SetTeam.
+    local ready, rootOrReason = waitForTeamCharacter(math.min(4, tonumber(env.TeamReadyTimeout) or 10))
+    if not ready and runtimeActive() and currentTeamName() == nil then
+        teamDebug("Remote did not produce a team yet; trying ChooseTeam GUI fallback")
+        tryChooseTeamViaGui(preferred)
+        ready, rootOrReason = waitForTeamCharacter(env.TeamReadyTimeout)
+    elseif not ready then
+        -- Team exists but the character/root is still spawning; give it the remaining window.
+        ready, rootOrReason = waitForTeamCharacter(env.TeamReadyTimeout)
+    end
+
+    teamSelectionBusy = false
+
+    if ready then
+        teamDebug(string.format("TEAM READY: %s root=%s", tostring(currentTeamName()), tostring(rootOrReason)))
+        AddLog("Team ready: " .. tostring(currentTeamName()), Color3.fromRGB(0, 255, 100))
+        return true, rootOrReason
+    end
+
+    teamDebug(string.format("TEAM FAILED: team=%s reason=%s", tostring(currentTeamName()), tostring(rootOrReason)))
+    AddLog("Auto team failed; sniper will retry while fruit remains.", Color3.fromRGB(255, 180, 80))
+    return false, rootOrReason
+end
+
+-- PrimeHub 8.0: restore the proven temporary flight noclip from 6.9.
+-- Every BasePart keeps its original CanCollide value and is restored after flight.
+local flightCollisionState = setmetatable({}, {__mode="k"})
+local flightNoclipActive = false
+
+local function enableFlightNoclip(character)
+    if not character then return 0 end
+    local newlySnapshotted = 0
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            if flightCollisionState[part] == nil then
+                flightCollisionState[part] = part.CanCollide
+                newlySnapshotted = newlySnapshotted + 1
+            end
+            if part.CanCollide then
+                part.CanCollide = false
+            end
+        end
+    end
+    if not flightNoclipActive then
+        flightNoclipActive = true
+        executorLog("FLIGHT", "noclip ON snapshottedParts=" .. tostring(newlySnapshotted))
+    end
+    return newlySnapshotted
+end
+
+local function restoreFlightCollisions()
+    local restored = 0
+    for part, oldCanCollide in pairs(flightCollisionState) do
+        if part and part.Parent then
+            pcall(function()
+                part.CanCollide = oldCanCollide
+            end)
+            restored = restored + 1
+        end
+        flightCollisionState[part] = nil
+    end
+    if flightNoclipActive then
+        executorLog("FLIGHT", "noclip OFF restoredParts=" .. tostring(restored))
+    end
+    flightNoclipActive = false
+end
+
+local function cleanupFlight()
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+
+    if root then
+        local bv = root:FindFirstChild("PrimeHubSniperBV")
+        if bv then pcall(function() bv:Destroy() end) end
+
+        local bg = root:FindFirstChild("PrimeHubSniperBG")
+        if bg then pcall(function() bg:Destroy() end) end
+
+        root.Velocity = Vector3.zero
+        root.RotVelocity = Vector3.zero
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.PlatformStand = false
+        humanoid.Sit = false
+        pcall(function()
+            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end)
+    end
+
+    restoreFlightCollisions()
+    env.ViajandoAteAFruta = false
+end
+
+local function applyFlight(targetPosition, requestedSpeed)
+    local root = getPlayerRoot()
+    local character = LocalPlayer.Character
+    if not root or not character then
+        AddLog("Flight failed: root unavailable.", Color3.fromRGB(255, 100, 100))
+        return false
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return false end
+
+    -- Refresh every tick so newly-created character parts cannot re-enable collisions mid-flight.
+    enableFlightNoclip(character)
+    humanoid.PlatformStand = true
+
+    local bv = root:FindFirstChild("PrimeHubSniperBV")
+    if not bv then
+        bv = Instance.new("BodyVelocity")
+        bv.Name = "PrimeHubSniperBV"
+        bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+        bv.P = 5000
+        bv.Parent = root
+    end
+
+    local bg = root:FindFirstChild("PrimeHubSniperBG")
+    if not bg then
+        bg = Instance.new("BodyGyro")
+        bg.Name = "PrimeHubSniperBG"
+        bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+        bg.P = 3000
+        bg.D = 500
+        bg.Parent = root
+    end
+
+    local rootPos = root.Position
+    local planarDelta = Vector3.new(targetPosition.X-rootPos.X,0,targetPosition.Z-rootPos.Z)
+    local planarDistance = planarDelta.Magnitude
+    local cruiseHeight = math.max(350, tonumber(env.FruitFlightCruiseHeight) or 350, targetPosition.Y + 80)
+
+    local flightTarget = targetPosition
+    if planarDistance > 200 then
+        if rootPos.Y < cruiseHeight - 20 then
+            flightTarget = Vector3.new(rootPos.X, cruiseHeight, rootPos.Z)
+        else
+            flightTarget = Vector3.new(targetPosition.X, cruiseHeight, targetPosition.Z)
+        end
+    end
+
+    local delta = flightTarget - root.Position
+    local distance = delta.Magnitude
+    local direction = distance > 0.05 and delta.Unit or Vector3.zero
+    local speed = math.max(50, tonumber(requestedSpeed) or tonumber(env.TweenSpeed) or 230)
+
+    if distance > 60 then
+        bv.Velocity = direction * speed
+    elseif distance > 3 then
+        local scaled = math.clamp((distance / 60) * speed, 15, speed)
+        bv.Velocity = direction * scaled
+    else
+        bv.Velocity = Vector3.zero
+    end
+
+    local horizontalLook = Vector3.new(flightTarget.X, root.Position.Y, flightTarget.Z)
+    if (horizontalLook-root.Position).Magnitude > 1 then
+        local facing = CFrame.new(root.Position, horizontalLook)
+        root.CFrame = facing
+        bg.CFrame = facing
+    else
+        bg.CFrame = root.CFrame
+    end
+    return true
+end
+
+local function moveTo(target, speed, timeoutSeconds)
+    local targetPosition = typeof(target) == "CFrame" and target.Position or target
+    if typeof(targetPosition) ~= "Vector3" then
+        AddLog("moveTo rejected invalid target", Color3.fromRGB(255, 100, 100))
+        return false
+    end
+
+    speed = tonumber(speed) or tonumber(env.TweenSpeed) or 230
+    timeoutSeconds = tonumber(timeoutSeconds) or 40
+    env.ViajandoAteAFruta = true
+
+    local deadline = tick() + timeoutSeconds
+    local arrived = false
+    while runtimeActive() and tick() < deadline do
+        local character = LocalPlayer.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if not humanoid or humanoid.Health <= 0 then break end
+
+        local root = getPlayerRoot()
+        if not root then break end
+        if (root.Position - targetPosition).Magnitude <= 2 then
+            arrived = true
+            break
+        end
+
+        if not applyFlight(targetPosition, speed) then break end
+        task.wait(0.1)
+    end
+
+    env.ViajandoAteAFruta = false
+    return arrived
+end
+
+local isToolStillHeld
+
+local function safeToolOriginalName(tool)
+    if not tool then return nil end
+    local ok, value = pcall(function() return tool:GetAttribute("OriginalName") end)
+    if ok and type(value) == "string" and value ~= "" then return value end
+    return nil
+end
+
+local function toolParentName(tool)
+    if not tool then return "nil" end
+    local ok, parent = pcall(function() return tool.Parent end)
+    if not ok or not parent then return "nil" end
+    local okName, name = pcall(function() return parent:GetFullName() end)
+    if okName then return tostring(name) end
+    return tostring(parent.Name or parent)
+end
+
+local function dumpHeldFruitTools(tag)
+    local held = listHeldFruitTools()
+    executorLog("STORE", string.format("%s heldFruitCount=%d", tostring(tag), #held))
+    for i, item in ipairs(held) do
+        local original = safeToolOriginalName(item)
+        local attrs = "{}"
+        pcall(function()
+            local parts = {}
+            for k, v in pairs(item:GetAttributes()) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
+            table.sort(parts)
+            attrs = "{" .. table.concat(parts, ",") .. "}"
+        end)
+        executorLog("STORE", string.format(
+            "  [%d] ptr=%s name=%q parent=%s OriginalName=%q EatRemote=%s attrs=%s",
+            i, tostring(item), tostring(item.Name), toolParentName(item), tostring(original),
+            tostring(item:FindFirstChild("EatRemote") ~= nil), attrs
+        ))
+    end
+    return held
+end
+
+local function sameFruitIdentity(a, b)
+    if not a or not b then return false end
+    if a == b then return true end
+    if tostring(a.Name) == tostring(b.Name) then return true end
+    local ao = safeToolOriginalName(a)
+    local bo = safeToolOriginalName(b)
+    return ao ~= nil and bo ~= nil and ao == bo
+end
+
+-- Re-find the fruit because Blox Fruits can replace/reparent the Tool during pickup/equip.
+local function reacquireHeldFruitTool(oldTool, preferredName, excludeSet, timeoutSeconds, expectedOriginal)
+    local deadline = tick() + (tonumber(timeoutSeconds) or tonumber(env.StoreReacquireTimeout) or 4)
+    local oldName = oldTool and tostring(oldTool.Name) or nil
+    local oldOriginal = safeToolOriginalName(oldTool)
+    expectedOriginal = expectedOriginal or oldOriginal or normalizeFruitStorageIdFromName(preferredName)
+
+    local identityKnown = (type(expectedOriginal) == "string" and expectedOriginal ~= "")
+        or (type(preferredName) == "string" and preferredName ~= "")
+
+    repeat
+        if oldTool and isToolStillHeld(oldTool) then
+            if not identityKnown or toolMatchesFruitIdentity(oldTool, preferredName, expectedOriginal) then
+                return oldTool, false
+            end
+        end
+
+        local held = listHeldToolsRaw()
+        local fallback = nil
+        for _, item in ipairs(held) do
+            if not excludeSet or not excludeSet[item] then
+                local original = safeToolOriginalName(item)
+
+                if expectedOriginal and original == expectedO
