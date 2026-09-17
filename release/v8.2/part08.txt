@@ -1,0 +1,337 @@
+ FRUIT{WORLD_DROP:RECOVERY_WAIT}"
+                            or "SERVER FRUIT{WORLD_DROP:PENDING}"
+                        if not nameSeen[label] and #stats.names < env.ScanDebugNamesLimit then
+                            nameSeen[label] = true
+                            stats.names[#stats.names + 1] = label
+                        end
+                    elseif recoveredConfirmed then
+                        -- This path is unlikely because a confirmed candidate should be a valid world model,
+                        -- but keep the diagnostic explicit if replication behaves oddly.
+                        stats.confirmedWorldDrops = stats.confirmedWorldDrops + 1
+                    end
+                end
+            end
+            return
+        end
+
+        if isTool then
+            stats.tools = stats.tools + 1
+        else
+            stats.worldModels = stats.worldModels + 1
+            if worldPending then
+                stats.pendingWorldDrops = stats.pendingWorldDrops + 1
+                stats.pendingConfirmRemaining = math.max(stats.pendingConfirmRemaining, confirmRemaining)
+            elseif worldConfirmed then
+                stats.confirmedWorldDrops = stats.confirmedWorldDrops + 1
+            end
+        end
+        local fruitLike = isFruitLikeTool(object)
+        if fruitLike then
+            stats.fruitLike = stats.fruitLike + 1
+            local original = scanOriginalName(object)
+            local label = isWorldModel
+                and (worldConfirmed and "SERVER FRUIT{WORLD_DROP:CONFIRMED}" or "SERVER FRUIT{WORLD_DROP:PENDING}")
+                or tostring(object.Name)
+            if original then label = label .. "{" .. original .. "}" end
+            if not nameSeen[label] and #stats.names < env.ScanDebugNamesLimit then
+                nameSeen[label] = true
+                stats.names[#stats.names + 1] = label
+            end
+            if isPlayerDroppedFruit(object) then stats.playerDrops = stats.playerDrops + 1 end
+        end
+
+        if isInsidePlayerCharacter(object) then
+            if fruitLike then stats.excludedHeld = stats.excludedHeld + 1 end
+        elseif isDroppedFruit(object) then
+            local allowedByOrigin = (not env.OnlyServerSpawnedFruits)
+                or (isWorldModel and worldConfirmed)
+            if allowedByOrigin and not pickupTargetBlacklisted(object) then
+                found[#found + 1] = object
+                stats.targets = stats.targets + 1
+                local resolvedName = fruitNameFromTool(object)
+                if resolvedName and not isRecognizedFruitName(resolvedName) then
+                    stats.unlistedTargets = stats.unlistedTargets + 1
+                end
+            end
+        end
+    end
+
+    if env.OnlyServerSpawnedFruits then
+        -- Primary path: CollectionService can return WORLD_DROP regardless of nesting depth.
+        local okTagged, taggedList = pcall(function()
+            return CollectionService:GetTagged("WORLD_DROP")
+        end)
+        if okTagged and type(taggedList) == "table" then
+            stats.tagged = #taggedList
+            for _, object in ipairs(taggedList) do
+                local okDesc, inWorkspace = pcall(function() return object:IsDescendantOf(workspace) end)
+                if okDesc and inWorkspace then inspectObject(object) end
+            end
+        end
+
+        -- Small fallback for a WORLD_DROP whose tag has not replicated yet.
+        local okChildren, children = pcall(function() return workspace:GetChildren() end)
+        if okChildren and type(children) == "table" then
+            stats.topLevel = #children
+            for _, object in ipairs(children) do
+                if object:IsA("Model") then inspectObject(object) end
+            end
+        end
+        scanPerfFastCalls = scanPerfFastCalls + 1
+    else
+        -- Player-drops ON keeps the proven exhaustive scanner.
+        local objects = nil
+        if env.ScanDescendants then
+            local ok, descendants = pcall(function() return workspace:GetDescendants() end)
+            objects = (ok and type(descendants) == "table") and descendants or workspace:GetChildren()
+        else
+            objects = workspace:GetChildren()
+        end
+        for _, object in ipairs(objects) do inspectObject(object) end
+        scanPerfFullCalls = scanPerfFullCalls + 1
+    end
+
+    local fruitNames = {}
+    for _, fruit in ipairs(found) do fruitNames[#fruitNames + 1] = tostring(fruit.Name) end
+    table.sort(fruitNames)
+    local signature = table.concat(fruitNames, "|")
+
+    stats.scanMs = math.max(0, (tick() - scanStarted) * 1000)
+    scanPerfCalls = scanPerfCalls + 1
+    scanPerfTotalMs = scanPerfTotalMs + stats.scanMs
+
+    local now = tick()
+    local shouldLog = env.ScanDebug and (
+        debugTag ~= nil
+        or tostring(game.JobId) ~= tostring(lastScanSummaryJobId)
+        or signature ~= lastScanFruitSignature
+        or stats.pendingWorldDrops ~= lastScanPendingWorldDrops
+        or (stats.targets > 0 and (now - lastScanLogAt) >= 2)
+    )
+    if shouldLog then
+        executorLog("SCAN", string.format(
+            "%s mode=%s objects=%d tagged=%d top=%d tools=%d worldModels=%d pending=%d confirmed=%d wait=%.2fs fruitLike=%d playerDrops=%d excludedHeld=%d targets=%d unlisted=%d scanMs=%.2f dropFilter=%s allFruits=%s names=[%s]",
+            tostring(debugTag or "scan"), stats.mode, stats.objects, stats.tagged, stats.topLevel, stats.tools, stats.worldModels,
+            stats.pendingWorldDrops, stats.confirmedWorldDrops, stats.pendingConfirmRemaining, stats.fruitLike,
+            stats.playerDrops, stats.excludedHeld, stats.targets, stats.unlistedTargets, stats.scanMs,
+            env.OnlyServerSpawnedFruits and "SERVER_ONLY" or "OFF",
+            tostring(env.SniperAllFruits), table.concat(stats.names, ", ")
+        ))
+        lastScanSummaryJobId = tostring(game.JobId)
+        lastScanFruitSignature = signature
+        lastScanPendingWorldDrops = stats.pendingWorldDrops
+        lastScanLogAt = now
+    end
+
+    return found, stats
+end
+
+local function isHeldFruitTool(item)
+    if not item or not item:IsA("Tool") then return false end
+    if isRecognizedFruitName(item.Name) then return true end
+
+    local okOriginal, originalName = pcall(function()
+        return item:GetAttribute("OriginalName")
+    end)
+    if okOriginal and type(originalName) == "string" and originalName ~= "" then
+        return true
+    end
+
+    -- Current fruit Tools normally expose EatRemote even when the display name changes.
+    if item:FindFirstChild("EatRemote") and string.find(tostring(item.Name), "Fruit", 1, true) then
+        return true
+    end
+
+    return false
+end
+
+local function listHeldToolsRaw()
+    local result = {}
+    local containers = {LocalPlayer.Character, LocalPlayer:FindFirstChildOfClass("Backpack") or LocalPlayer.Backpack}
+    for _, container in ipairs(containers) do
+        if container then
+            for _, item in ipairs(container:GetChildren()) do
+                if item:IsA("Tool") then result[#result + 1] = item end
+            end
+        end
+    end
+    return result
+end
+
+local function listHeldFruitTools()
+    local result = {}
+    for _, container in ipairs({LocalPlayer.Character, LocalPlayer:FindFirstChildOfClass("Backpack") or LocalPlayer.Backpack}) do
+        if container then
+            for _, item in ipairs(container:GetChildren()) do
+                if isHeldFruitTool(item) then
+                    result[#result + 1] = item
+                end
+            end
+        end
+    end
+    return result
+end
+
+local function snapshotHeldFruitTools()
+    -- Snapshot ALL Tools, not only recognized fruits. Some game revisions rename/replace
+    -- a picked fruit before its fruit markers/attributes replicate to the client.
+    local seen = {}
+    for _, tool in ipairs(listHeldToolsRaw()) do seen[tool] = true end
+    return seen
+end
+
+local function normalizeFruitStorageIdFromName(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local meta = FruitMetadata[name]
+    if meta and type(meta.id) == "string" and meta.id ~= "" then
+        return meta.id
+    end
+    local base = name:gsub(" Fruit$", "")
+    if base ~= "" and not string.find(base, "-", 1, true) then
+        return base .. "-" .. base
+    end
+    return nil
+end
+
+local function toolMatchesFruitIdentity(item, preferredName, expectedOriginal)
+    if not item or not item:IsA("Tool") then return false end
+
+    local identityKnown = (type(expectedOriginal) == "string" and expectedOriginal ~= "")
+        or (type(preferredName) == "string" and preferredName ~= "")
+    if not identityKnown and isHeldFruitTool(item) then
+        -- A generic server-spawn has no identity until pickup. The pre-pickup snapshot
+        -- guarantees this Tool is newly created, so accepting it is safe.
+        return true
+    end
+
+    local original = scanOriginalName(item)
+    if expectedOriginal and original == expectedOriginal then
+        return true
+    end
+
+    if preferredName and tostring(item.Name) == tostring(preferredName) then
+        return true
+    end
+
+    local preferredId = normalizeFruitStorageIdFromName(preferredName)
+    if preferredId and original == preferredId then
+        return true
+    end
+
+    return false
+end
+
+local function findPickedUpTool(excludeSet, preferredName, expectedOriginal)
+    local identityKnown = (type(expectedOriginal) == "string" and expectedOriginal ~= "")
+        or (type(preferredName) == "string" and preferredName ~= "")
+
+    local fallback = nil
+    for _, item in ipairs(listHeldToolsRaw()) do
+        if not excludeSet or not excludeSet[item] then
+            if toolMatchesFruitIdentity(item, preferredName, expectedOriginal) then
+                return item
+            end
+
+            -- Only allow a generic fallback when the dropped fruit itself had no
+            -- usable identity. Never let an unrelated inventory fruit (for example
+            -- a delayed Kitsune restore after team selection) masquerade as the pickup.
+            if not identityKnown and isHeldFruitTool(item) then
+                fallback = fallback or item
+            end
+        end
+    end
+
+    return fallback
+end
+
+local function findFruitTool(excludeSet, preferredName)
+    local fallback = nil
+    for _, item in ipairs(listHeldFruitTools()) do
+        if not excludeSet or not excludeSet[item] then
+            if preferredName and item.Name == preferredName then
+                return item
+            end
+            fallback = fallback or item
+        end
+    end
+    return fallback
+end
+
+local function getPlayerCharacter()
+    local character = LocalPlayer.Character
+    if character then return character end
+
+    -- Blox Fruits can create the model in Workspace.Characters a fraction earlier
+    -- than LocalPlayer.Character is assigned after team selection.
+    local characters = workspace:FindFirstChild("Characters")
+    if characters then
+        return characters:FindFirstChild(LocalPlayer.Name)
+    end
+    return nil
+end
+
+local function getPlayerRoot()
+    local character = getPlayerCharacter()
+    if not character then return nil end
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local teamSelectionBusy = false
+local lastTeamAttempt = 0
+
+local function currentTeamName()
+    local team = LocalPlayer.Team
+    if team then
+        local ok, name = pcall(function() return team.Name end)
+        if ok and type(name) == "string" and name ~= "" then return name end
+        return tostring(team)
+    end
+    return nil
+end
+
+local function waitForTeamCharacter(timeout)
+    local deadline = tick() + math.max(1, tonumber(timeout) or 10)
+    repeat
+        if not runtimeActive() then return false, "runtime_stopped" end
+        local teamName = currentTeamName()
+        local character = getPlayerCharacter()
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if teamName and root and humanoid and humanoid.Health > 0 then
+            return true, root
+        end
+        task.wait(0.2)
+    until tick() >= deadline
+    return false, "timeout"
+end
+
+local function tryChooseTeamViaGui(preferred)
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then
+        teamDebug("GUI fallback unavailable: PlayerGui not found")
+        return false
+    end
+
+    local needle = string.lower(tostring(preferred or "Pirates"))
+    local candidates = {}
+    for _, obj in ipairs(playerGui:GetDescendants()) do
+        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+            local text = ""
+            pcall(function() text = tostring(obj.Text or "") end)
+            local haystack = string.lower(tostring(obj:GetFullName()) .. " " .. text)
+            if string.find(haystack, needle, 1, true) then
+                candidates[#candidates + 1] = obj
+            end
+        end
+    end
+
+    teamDebug(string.format("GUI fallback found %d candidate button(s) for %s", #candidates, tostring(preferred)))
+    for _, button in ipairs(candidates) do
+        local fired = false
+        if type(firesignal) == "function" then
+            local okActivated = pcall(function() firesignal(button.Activated) end)
+            local okClick = pcall(function() firesignal(button.MouseButton1Click) end)
+            fired = okActivated or okClick
+        end
+
+        if t
