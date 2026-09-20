@@ -1,0 +1,15 @@
+o.midQueued, info.lowQueued, tonumber(info.target) or 0,
+        tonumber(info.minPlayers) or 0, tonumber(info.maxPlayers) or 0, tostring(info.cooldown),
+        tostring(info.botServerCooldown), tostring(info.builtAt)
+    ))
+    return info
+end
+
+env.PrimeHubTeamStatus = function()
+    local root = getPlayerRoot()
+    local info = {
+        team = currentTeamName(),
+        preferred = env.PreferredTeam,
+        autoTeam = env.AutoTeam,
+        character = getPlayerCharacter(),
+        root = ro

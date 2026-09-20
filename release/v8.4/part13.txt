@@ -1,0 +1,11 @@
+se: --"
+            licenseRemaining.Text="Time left: --"
+        end
+        if on then
+            statusLabel.Text="READY"; statusLabel.TextColor3=THEME.purpleHi; subStatus.Text="Server: "..shortJobId().."  •  licensed"
+            startWorkersIfLicensed()
+            if becameActive and currentPage == "License" then
+                switchPage("Dashboard")
+            end
+        else
+            statusLabel.Text="LOCKED"; statusLabel.TextColor3=THEME.bad; subStatus.Text="License required"

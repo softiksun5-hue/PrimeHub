@@ -1,0 +1,16 @@
+eForFruits("manual")
+    executorLog("SCAN", "manual result targetCount=" .. tostring(#fruits))
+    return fruits, stats
+end
+
+env.PrimeHubScanFruits = scanWorkspaceForFruits
+env.PrimeHubDeepScanNow = deepScanWorker
+env.PrimeHubProcessFruit = processFruit
+env.PrimeHubDumpHeldFruits = function()
+    return dumpHeldFruitTools("manual inventory dump")
+end
+
+env.PrimeHubStoreHeldFruit = function()
+    dumpHeldFruitTools("manual store requested")
+    local tool = findFruitTool(nil, nil)
+    if not tool

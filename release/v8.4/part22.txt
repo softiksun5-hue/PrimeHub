@@ -1,0 +1,12 @@
+ then
+        AddLog("Manual store: no held fruit Tool found.", Color3.fromRGB(255, 180, 80))
+        return false, "no_tool"
+    end
+
+    AddLog("Manual store requested for " .. tostring(tool.Name), Color3.fromRGB(120, 200, 255))
+    local stored, reason, detail = storeFruit(tool, tool.Name, nil)
+    if stored then
+        env.HoldingHighTierFruit = false
+        AddLog("Manual store success: " .. tostring(tool.Name), Color3.fromRGB(0, 255, 100))
+    else
+        AddLog("Manual store failed: " 

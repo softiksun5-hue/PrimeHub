@@ -1,0 +1,10 @@
+        scanDescendants = env.ScanDescendants,
+        scanDebug = env.ScanDebug,
+        sniperAllFruits = env.SniperAllFruits,
+        hopAttemptLimit = env.HopAttemptLimit,
+        hopRetryDelay = env.HopRetryDelay,
+        initialHopAfterScan = env.InitialHopAfterScan,
+        speedTest = false,
+        selfContained = type(env.PrimeHubSelfSource) == "string",
+        selfSourceBytes = type(env.PrimeHubSelfSource) == "string" and #env.PrimeHubSelfSource or 0,
+        scanPerfCalls = scanPerf

@@ -1,0 +1,10 @@
+            switchPage("License")
+        end
+        lastLicenseUiActive = on
+    end
+    onLicenseChanged(refreshLicenseUI)
+    
+    local initialState=initializeRuntime()
+    hopCountLabel.Text=tostring(hopCount); fruitCountLabel.Text=tostring(fruitCount); speedValue.Text=tostring(env.TweenSpeed)
+    local initialRatio=math.clamp(((tonumber(env.TweenSpeed) or 230)-50)/180,0,1); fill.Size=UDim2.new(initialRatio,0,1,0); knob.Position=UDim2.new(initialRatio,-8,.5,-8)
+    local qstate=loadRuntime

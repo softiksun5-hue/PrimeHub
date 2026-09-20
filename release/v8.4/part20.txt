@@ -1,0 +1,13 @@
+owser and browser.ClassName or nil,
+        teleportFailureSerial = teleportFailureSerial,
+        lastTeleportFailure = lastTeleportFailure,
+    }
+    executorLog("INFO", "PrimeHubDebugHop nativeBrowser=" .. tostring(info.nativeBrowser)
+        .. " autoHop=" .. tostring(info.autoHop)
+        .. " hopping=" .. tostring(info.hopping)
+        .. " failureSerial=" .. tostring(info.teleportFailureSerial))
+    return info
+end
+
+env.PrimeHubScanDebug = function()
+    local fruits, stats = scanWorkspac

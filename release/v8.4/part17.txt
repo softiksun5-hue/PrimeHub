@@ -1,0 +1,5 @@
+(env.ScanDescendants and "descendants" or "top-level"),tostring(env.SniperAllFruits),env.OnlyServerSpawnedFruits and "SERVER_ONLY" or "OFF",HOP_QUEUE_STRATEGY,tonumber(env.HopQueueTarget) or 200,tostring(env.HopVisitedCooldown)))
+    hopDebug("__ServerBrowser="..tostring(ReplicatedStorage:FindFirstChild("__ServerBrowser")))
+    
+    -- Start locked, then let the completed license check choose the final page.
+    -- This avoids the old race where a successful cached-license check opened Dashboard

@@ -1,0 +1,359 @@
+v.PrimeHubLicenseValid = false
+    notifyLicenseChanged()
+    return false, licenseState.message
+end
+
+local function activatePrimeHubLicense(key)
+    key = tostring(key or ""):gsub("%s+", ""):upper()
+    if key == "" then return setLicenseError("Enter a PrimeHub license key") end
+    licenseState.status = "CHECKING"
+    licenseState.message = "Verifying license..."
+    notifyLicenseChanged()
+    local data, err = licensePost("/v1/hub/activate", {
+        licenseKey = key,
+        installationId = licenseState.installationId,
+        productId = PRIMEHUB_PRODUCT_ID,
+        buildId = PRIMEHUB_BUILD_ID,
+        version = PRIMEHUB_LICENSE_VERSION,
+    })
+    if not data then return setLicenseError(err) end
+    return setLicenseActive(data, key)
+end
+
+local function renewPrimeHubLicense()
+    if licenseRenewBusy then return false, "renew_busy" end
+    if not licenseState.leaseToken or licenseState.leaseToken == "" then
+        if licenseState.licenseKey then return activatePrimeHubLicense(licenseState.licenseKey) end
+        return setLicenseError("No saved PrimeHub license")
+    end
+    licenseRenewBusy = true
+    local data, err = licensePost("/v1/hub/renew", {
+        leaseToken = licenseState.leaseToken,
+        installationId = licenseState.installationId,
+        productId = PRIMEHUB_PRODUCT_ID,
+        buildId = PRIMEHUB_BUILD_ID,
+        version = PRIMEHUB_LICENSE_VERSION,
+    })
+    licenseRenewBusy = false
+    if not data then return setLicenseError(err) end
+    return setLicenseActive(data, nil)
+end
+
+local function initializeLicense()
+    loadLicenseCache()
+    local now = os.time()
+    if licenseState.leaseToken and licenseState.leaseExpiresAt > (now + 30) then
+        licenseState.active = true
+        licenseState.status = "ACTIVE"
+        licenseState.message = "Cached lease active"
+        env.PrimeHubLicenseValid = true
+        notifyLicenseChanged()
+        return true
+    end
+    if licenseState.licenseKey and licenseState.licenseKey ~= "" then
+        return activatePrimeHubLicense(licenseState.licenseKey)
+    end
+    return setLicenseError("Enter a PrimeHub license key")
+end
+
+local function licenseRenewWorker()
+    while env.PrimeHubRuntimeId == RUNTIME_ID do
+        if licenseState.active then
+            local remaining = (tonumber(licenseState.leaseExpiresAt) or 0) - os.time()
+            if remaining <= 300 then
+                local ok = renewPrimeHubLicense()
+                if not ok then return end
+            end
+        end
+        task.wait(30)
+    end
+end
+
+local function deactivatePrimeHubLicense()
+    if licenseState.leaseToken then
+        pcall(function()
+            licensePost("/v1/hub/deactivate", {
+                leaseToken = licenseState.leaseToken,
+                installationId = licenseState.installationId,
+                productId = PRIMEHUB_PRODUCT_ID,
+            })
+        end)
+    end
+    licenseState.leaseToken = nil
+    licenseState.leaseExpiresAt = 0
+    licenseState.active = false
+    licenseState.status = "LOCKED"
+    licenseState.message = "License deactivated on this device"
+    env.PrimeHubLicenseValid = false
+    saveLicenseCache()
+    notifyLicenseChanged()
+end
+
+
+local HOP_QUEUE_STRATEGY = "stable-5to8-native-v84-r4-anti260"
+
+local function pruneVisitTimestamps(state)
+    state.serverVisits = type(state.serverVisits) == "table" and state.serverVisits or {}
+    state.serverBlockedUntil = type(state.serverBlockedUntil) == "table" and state.serverBlockedUntil or {}
+    local now = os.time()
+    local cooldown = math.max(30, tonumber(env.HopVisitedCooldown) or 1500)
+    local maxBlockCooldown = math.max(cooldown, tonumber(env.HopMaxBlockCooldown) or 1500)
+    local botCooldown = math.min(maxBlockCooldown, math.max(cooldown, tonumber(env.BotServerCooldown) or cooldown))
+    local keepFor = math.max(cooldown * 2, botCooldown * 2)
+    for id, ts in pairs(state.serverVisits) do
+        ts = tonumber(ts) or 0
+        if ts <= 0 or (now - ts) > keepFor then
+            state.serverVisits[id] = nil
+        end
+    end
+    for id, untilTs in pairs(state.serverBlockedUntil) do
+        untilTs = tonumber(untilTs) or 0
+        local visitTs = tonumber(state.serverVisits[id]) or 0
+        local maxUntil = (visitTs > 0 and visitTs or now) + maxBlockCooldown
+        if untilTs > maxUntil then
+            untilTs = maxUntil
+            state.serverBlockedUntil[id] = maxUntil
+        end
+        if untilTs <= now then state.serverBlockedUntil[id] = nil end
+    end
+end
+
+local function assessCurrentServerPopulation()
+    local info = {total=0, fresh7=0, fresh30=0, old180=0, botHeavy=false}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            info.total = info.total + 1
+            local age = tonumber(player.AccountAge) or -1
+            if age >= 0 and age <= 7 then info.fresh7 = info.fresh7 + 1 end
+            if age >= 0 and age <= 30 then info.fresh30 = info.fresh30 + 1 end
+            if age >= 180 then info.old180 = info.old180 + 1 end
+        end
+    end
+    local suspiciousNeeded = math.max(3, math.ceil(info.total * 0.60))
+    local currentSea = getCurrentSea()
+    info.botHeavy = env.BotServerScreening == true
+        and (currentSea == "Sea 2" or currentSea == "Sea 3")
+        and info.total >= 4
+        and info.fresh30 >= suspiciousNeeded
+        and info.fresh7 >= 2
+    hopDebug(string.format(
+        "population total=%d fresh7=%d fresh30=%d old180=%d botHeavy=%s",
+        info.total, info.fresh7, info.fresh30, info.old180, tostring(info.botHeavy)
+    ))
+    return info
+end
+
+local function rememberVisitedServer(serverId, customCooldown)
+    if serverId == nil or tostring(serverId) == "" then return false end
+    serverId = tostring(serverId)
+
+    local state = loadRuntimeState()
+    pruneVisitTimestamps(state)
+
+    local now = os.time()
+    local normalCooldown = math.max(30, tonumber(env.HopVisitedCooldown) or 1500)
+    local maxBlockCooldown = math.max(normalCooldown, tonumber(env.HopMaxBlockCooldown) or 1500)
+    local effectiveCooldown = math.min(
+        maxBlockCooldown,
+        math.max(normalCooldown, tonumber(customCooldown) or normalCooldown)
+    )
+    state.serverVisits[serverId] = now
+    state.serverBlockedUntil = type(state.serverBlockedUntil) == "table" and state.serverBlockedUntil or {}
+    if effectiveCooldown > normalCooldown then
+        state.serverBlockedUntil[serverId] = now + effectiveCooldown
+    else
+        state.serverBlockedUntil[serverId] = nil
+    end
+
+    local exists = false
+    for _, knownId in ipairs(state.servers) do
+        if tostring(knownId) == serverId then exists = true break end
+    end
+    if not exists then table.insert(state.servers, serverId) end
+    while #state.servers > 500 do table.remove(state.servers, 1) end
+
+    state.hops = hopCount
+    state.fruits = fruitCount
+    state.speed = tonumber(env.TweenSpeed) or 230
+    saveRuntimeState(state)
+    print(string.format("[HOP] Server %s cooldown until +%ss.", serverId, tostring(math.floor(effectiveCooldown))))
+    return true
+end
+
+local function makeVisitedSet(state)
+    local visited = {}
+    state.serverVisits = type(state.serverVisits) == "table" and state.serverVisits or {}
+    state.serverBlockedUntil = type(state.serverBlockedUntil) == "table" and state.serverBlockedUntil or {}
+    local now = os.time()
+    local cooldown = math.max(30, tonumber(env.HopVisitedCooldown) or 1500)
+    for id, ts in pairs(state.serverVisits) do
+        ts = tonumber(ts) or 0
+        if ts > 0 and (now - ts) < cooldown then visited[tostring(id)] = true end
+    end
+    for id, untilTs in pairs(state.serverBlockedUntil) do
+        if (tonumber(untilTs) or 0) > now then visited[tostring(id)] = true end
+    end
+    return visited
+end
+
+local function wasServerMarkedRecently(serverId, seconds)
+    if not serverId or tostring(serverId) == "" then return false end
+    local state = loadRuntimeState()
+    local ts = tonumber((state.serverVisits or {})[tostring(serverId)]) or 0
+    return ts > 0 and (os.time() - ts) >= 0 and (os.time() - ts) <= (tonumber(seconds) or 120)
+end
+
+local function shuffleServers(list)
+    local rng = Random.new()
+    for i = #list, 2, -1 do
+        local j = rng:NextInteger(1, i)
+        list[i], list[j] = list[j], list[i]
+    end
+    return list
+end
+
+local function sortHopCandidates(list)
+    -- Lower population first (5 -> 6 -> 7 -> 8) because fewer players means
+    -- less competition for a fruit that may already be on the map. Randomize
+    -- inside the same population bucket so we do not walk the same page order.
+    local rng = Random.new()
+    for _, server in ipairs(list) do
+        if type(server) == "table" and server._primeHubSortJitter == nil then
+            server._primeHubSortJitter = rng:NextNumber()
+        end
+    end
+    table.sort(list, function(a, b)
+        local ap = tonumber(a and a.playing) or 99
+        local bp = tonumber(b and b.playing) or 99
+        if ap ~= bp then return ap < bp end
+        local aa = tonumber(a and a._primeHubSortJitter) or 0
+        local ba = tonumber(b and b._primeHubSortJitter) or 0
+        return aa < ba
+    end)
+    return list
+end
+
+local function collectUnvisitedServersUnlocked(maxCandidates)
+    local state = loadRuntimeState()
+    pruneVisitTimestamps(state)
+
+    state.serverQueue = type(state.serverQueue) == "table" and state.serverQueue or {}
+    state.serverQueueBuiltAt = tonumber(state.serverQueueBuiltAt) or 0
+    state.serverQueueStrategy = tostring(state.serverQueueStrategy or "")
+    state.serverQueuePlaceId = tostring(state.serverQueuePlaceId or "")
+    state.nativeBrowserGoodPage = tonumber(state.nativeBrowserGoodPage)
+
+    local currentPlaceId = tostring(game.PlaceId or "")
+    local currentJobId = tostring(game.JobId or "")
+
+    if state.serverQueuePlaceId ~= currentPlaceId then
+        state.serverQueue = {}
+        state.serverQueueBuiltAt = 0
+        state.serverQueuePlaceId = currentPlaceId
+    end
+
+    if state.serverQueueStrategy ~= HOP_QUEUE_STRATEGY then
+        state.serverQueue = {}
+        state.serverQueueBuiltAt = 0
+        state.serverQueueStrategy = HOP_QUEUE_STRATEGY
+        saveRuntimeStateImmediate(state)
+        hopDebug("queue strategy changed -> stable-5to8-native-v84-r4-anti260; old queue cleared")
+    end
+
+    local minFreeSlots = math.max(1, tonumber(env.HopMinFreeSlots) or 1)
+    local queueTarget = math.max(36, math.min(100, tonumber(env.HopQueueTarget) or 72))
+    local refillThreshold = math.max(8, math.min(20, tonumber(env.HopQueueRefillThreshold) or 12))
+    local queueTtl = math.max(8, math.min(30, tonumber(env.HopQueueFreshTtl) or 15))
+    maxCandidates = math.max(1, tonumber(maxCandidates) or tonumber(env.HopAttemptLimit) or 6)
+
+    local nowUnix = os.time()
+    local function isBlockedByVisit(id, relaxedSeconds)
+        local visitTs = tonumber((state.serverVisits or {})[id]) or 0
+        local blockedUntil = tonumber((state.serverBlockedUntil or {})[id]) or 0
+        if blockedUntil > nowUnix then return true end
+        if visitTs <= 0 then return false end
+        local window = tonumber(relaxedSeconds)
+        if window == nil then window = math.max(30, tonumber(env.HopVisitedCooldown) or 1500) end
+        return (nowUnix - visitTs) < window
+    end
+
+    local function normalize(raw, relaxedSeconds)
+        if type(raw) ~= "table" then return nil end
+        local id = tostring(raw.id or raw.Id or raw.JobId or raw.jobId or "")
+        local playing = tonumber(raw.playing or raw.Playing or raw.Count or raw.count or raw.PlayerCount or raw.playerCount) or 0
+        local capacity = tonumber(raw.maxPlayers or raw.MaxPlayers or raw.Capacity or raw.capacity) or tonumber(Players.MaxPlayers) or 12
+        local freeSlots = math.max(0, capacity - playing)
+        local observedAt = tonumber(raw._primeHubObservedAt or raw.observedAt) or 0
+        if #id < 5 or id == currentJobId or capacity <= playing or freeSlots < minFreeSlots then return nil end
+        if playing < (tonumber(env.HopQueueMinPlayers) or 5)
+            or playing > (tonumber(env.HopQueueMaxPlayers) or 8)
+        then return nil end
+        if observedAt > 0 and (nowUnix - observedAt) > (tonumber(env.HopCandidateMaxAge) or 20) then
+            return nil
+        end
+        if isBlockedByVisit(id, relaxedSeconds) then return nil end
+        return {
+            id=id, playing=playing, maxPlayers=capacity,
+            _primeHubFreeSlots=freeSlots, _primeHubTier="preferred",
+            _primeHubObservedAt=observedAt > 0 and observedAt or nowUnix,
+        }
+    end
+
+    local queue, seen = {}, {}
+    local function addServer(raw, relaxedSeconds)
+        local server = normalize(raw, relaxedSeconds)
+        if not server or seen[server.id] then return false end
+        seen[server.id] = true
+        queue[#queue + 1] = server
+        return true
+    end
+
+    -- Reuse cached 5-8 candidates first. TTL is soft: a healthy queue should never be
+    -- thrown away just because it is a few minutes old.
+    local queueAge = state.serverQueueBuiltAt > 0 and math.max(0, nowUnix - state.serverQueueBuiltAt) or math.huge
+    for _, raw in ipairs(state.serverQueue) do
+        addServer(raw, nil)
+    end
+    if queueAge <= queueTtl and #queue >= math.max(maxCandidates, refillThreshold) then
+        state.serverQueue = queue
+        state.serverQueueStrategy = HOP_QUEUE_STRATEGY
+        state.serverQueuePlaceId = currentPlaceId
+        saveRuntimeStateImmediate(state)
+        hopDebug(string.format("reusing fresh 5-8 queue age=%ds size=%d ttl=%ds", math.floor(queueAge), #queue, math.floor(queueTtl)))
+        local result = {}
+        for i=1, math.min(maxCandidates, #queue) do result[#result+1] = queue[i] end
+        return result
+    end
+
+    local browser = nil
+    pcall(function() browser = ReplicatedStorage:FindFirstChild("__ServerBrowser") end)
+    local nativePages, nativeRows, nativeTargetRows, nativeErrors = 0, 0, 0, 0
+    local targetRowsAll, targetRowsSeen = {}, {}
+
+    local function rememberTarget(raw)
+        local id = tostring(raw.id or "")
+        if #id < 5 or targetRowsSeen[id] then return end
+        targetRowsSeen[id] = true
+        targetRowsAll[#targetRowsAll + 1] = raw
+        nativeTargetRows = nativeTargetRows + 1
+        addServer(raw, nil)
+    end
+
+    -- Query native browser in small concurrent waves instead of 100 invokes at once.
+    if env.HopNativeBrowserEnabled ~= false and browser and browser:IsA("RemoteFunction") then
+        local pageOrder, pageSeen = {}, {}
+        local function addPage(p)
+            p = tonumber(p)
+            if p and p >= 1 and p <= 100 and not pageSeen[p] then
+                pageSeen[p] = true
+                pageOrder[#pageOrder + 1] = p
+            end
+        end
+        local good = tonumber(state.nativeBrowserGoodPage)
+        if good then
+            addPage(good)
+            for d=1,10 do addPage(good-d); addPage(good+d) end
+        end
+        for p=1,100 do addPage(p) end
+
+        local waveSize = tonu

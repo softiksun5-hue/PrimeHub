@@ -1,0 +1,16 @@
+.. tostring(reason) .. " / " .. tostring(detail), Color3.fromRGB(255, 100, 100))
+    end
+    return stored, reason, detail
+end
+env.PrimeHubChooseTeam = function(team)
+    if team == "Marines" then
+        env.PreferredTeam = "Marines"
+    else
+        env.PreferredTeam = "Pirates"
+    end
+    return ensureTeamReady("manual PrimeHubChooseTeam", env.PreferredTeam)
+end
+
+env.PrimeHubServerQueueStatus = function()
+    local state = loadRuntimeState()
+    local queue = type(state.serverQueue) == "tabl

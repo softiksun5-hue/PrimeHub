@@ -1,0 +1,350 @@
+rying hop after teleport rejection...", Color3.fromRGB(255, 200, 0))
+                ServerHop()
+            end
+        end)
+    end)
+end)
+
+local function responseLooksLikeFailure(value)
+    if value == false then return true, "native returned false" end
+    if type(value) == "string" then
+        local lower = string.lower(value)
+        if string.find(lower, "full", 1, true)
+            or string.find(lower, "fail", 1, true)
+            or string.find(lower, "error", 1, true)
+            or string.find(lower, "unauthorized", 1, true)
+        then
+            return true, value
+        end
+    end
+    return false, nil
+end
+
+local function waitForTeleportFailure(serialBefore)
+    local deadline = tick() + math.max(1, tonumber(env.HopFailureWindow) or 3)
+    while runtimeActive() and tick() < deadline do
+        if teleportFailureSerial ~= serialBefore then
+            local detail = lastTeleportFailure and lastTeleportFailure.message or "late teleport failure"
+            return false, detail
+        end
+
+        -- Some server-initiated teleports show a Roblox prompt without reliably
+        -- surfacing through TeleportInitFailed to the executor. Observe it as an
+        -- extra signal, but NEVER destroy the prompt/overlay.
+        local promptText = observeTeleportErrorPrompt()
+        if promptText then
+            teleportFailureSerial = teleportFailureSerial + 1
+            lastTeleportFailure = {
+                result = "RobloxPrompt",
+                message = tostring(promptText),
+            }
+            return false, tostring(promptText)
+        end
+
+        task.wait(0.1)
+    end
+    return true, "initiated"
+end
+
+local function requestTeleportToServer(server)
+    if type(server) ~= "table" then return false, "invalid_server" end
+    local serverId = tostring(server.id or "")
+    if serverId == "" then return false, "missing_server_id" end
+
+    local freeSlots = tonumber(server._primeHubFreeSlots)
+        or math.max(0, (tonumber(server.maxPlayers) or 0) - (tonumber(server.playing) or 0))
+
+    local summary = string.format(
+        "Trying server %s | players %s/%s | free %s",
+        string.sub(serverId, 1, 8),
+        tostring(server.playing or "?"),
+        tostring(server.maxPlayers or "?"),
+        tostring(freeSlots)
+    )
+    AddLog(summary, Color3.fromRGB(0, 200, 255))
+    hopDebug("candidate fullId=" .. serverId
+        .. " playing=" .. tostring(server.playing)
+        .. " maxPlayers=" .. tostring(server.maxPlayers)
+        .. " free=" .. tostring(freeSlots))
+
+    local previousHopCount = hopCount
+    -- Update the visible counter first without spawning a second state-file write.
+    -- rememberVisitedServer below persists the new hop count together with the destination.
+    updateStats(previousHopCount + 1, nil, false)
+    rememberVisitedServer(serverId)
+    queueReloadAfterTeleport()
+
+    local serialBefore = teleportFailureSerial
+    local nativeBrowser = nil
+    pcall(function()
+        nativeBrowser = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    end)
+
+    -- Blox Fruits uses this server-side browser remote. This is essential on
+    -- experiences where client-initiated TeleportService calls are Unauthorized.
+    if env.HopPreferNativeBrowser
+        and nativeBrowser
+        and nativeBrowser:IsA("RemoteFunction")
+    then
+        hopDebug("teleport method=__ServerBrowser RemoteFunction command=teleport server=" .. serverId)
+
+        local invokeOk, invokeResult = pcall(function()
+            return nativeBrowser:InvokeServer("teleport", serverId)
+        end)
+
+        hopDebug("native invoke ok=" .. tostring(invokeOk) .. " result=" .. tostring(invokeResult))
+
+        if not invokeOk then
+            updateStats(previousHopCount, nil)
+            executorLog("WARN", "__ServerBrowser invoke failed: " .. tostring(invokeResult))
+            return false, "native_invoke_error: " .. tostring(invokeResult)
+        end
+
+        local rejected, rejectReason = responseLooksLikeFailure(invokeResult)
+        if rejected then
+            updateStats(previousHopCount, nil)
+            return false, "native_rejected: " .. tostring(rejectReason)
+        end
+
+        teleportPendingUntil = tick() + (tonumber(env.HopTeleportGuardSeconds) or 20)
+        local initiated, detail = waitForTeleportFailure(serialBefore)
+        if not initiated then
+            teleportPendingUntil = 0
+            updateStats(previousHopCount, nil)
+            return false, detail
+        end
+
+        teleportFailureStreak = 0
+        return true, "native_initiated"
+    end
+
+    executorLog("WARN", "__ServerBrowser unavailable; native-only R4 will retry after backoff")
+    updateStats(previousHopCount, nil)
+    teleportPendingUntil = tick() + math.max(3, tonumber(env.HopFailureBackoffMax) or 6)
+    return false, "native_browser_unavailable"
+
+end
+
+ServerHop = function()
+    if hopping then return false end
+    if teleportGuardActive() then
+        executorLog("HOP", string.format(
+            "hop suppressed: prior teleport still in-flight guard=%.1fs",
+            math.max(0, teleportPendingUntil - tick())
+        ))
+        return false
+    end
+    if env.HoldingHighTierFruit then
+        AddLog("Hop blocked: Holding high-tier fruit in Safe Zone", Color3.fromRGB(255, 200, 0))
+        return false
+    end
+
+    hopping = true
+    local ok, result = pcall(function()
+        local fruits, preHopStats = scanWorkspaceForFruits("pre-hop")
+        if #fruits > 0 then
+            AddLog("Hop cancelled: target fruit is still present.", Color3.fromRGB(255, 200, 0))
+            return false
+        end
+        if preHopStats and (tonumber(preHopStats.pendingWorldDrops) or 0) > 0 then
+            executorLog("HOP", string.format(
+                "hop blocked: WORLD_DROP pending/recovering pending=%d wait=%.2fs",
+                tonumber(preHopStats.pendingWorldDrops) or 0,
+                tonumber(preHopStats.pendingConfirmRemaining) or 0
+            ))
+            return false
+        end
+
+        local currentJobId = tostring(game.JobId or "")
+        if currentJobId ~= "" and not currentServerRemembered then
+            -- The destination is already persisted immediately before teleport.
+            -- Avoid rewriting the same state file again on arrival unless this was
+            -- a manually joined / previously unknown server.
+            if wasServerMarkedRecently(currentJobId, 120) then
+                currentServerRemembered = true
+                executorLog("HOP", "current server already marked by previous teleport; duplicate state write skipped")
+            else
+                local population = assessCurrentServerPopulation()
+                local customCooldown = nil
+                if population.botHeavy then
+                    customCooldown = tonumber(env.BotServerCooldown) or 1500
+                    AddLog(string.format(
+                        "Bot-heavy server detected (%d/%d accounts <=30d). Revisit cooldown: %ds",
+                        population.fresh30, population.total, customCooldown
+                    ), Color3.fromRGB(255, 180, 80))
+                end
+                if rememberVisitedServer(currentJobId, customCooldown) then
+                    AddLog("Current server " .. currentJobId .. " added to recent cooldown.", Color3.fromRGB(100, 200, 255))
+                end
+                currentServerRemembered = true
+            end
+        end
+
+        local limit = math.max(1, tonumber(env.HopAttemptLimit) or 8)
+        AddLog("Searching for server candidates...", Color3.fromRGB(0, 180, 255))
+        local candidates = collectUnvisitedServers(limit)
+        hopDebug("collectUnvisitedServers returned " .. tostring(#candidates) .. " candidate(s)")
+        if #candidates == 0 then
+            AddLog(
+                "No fresh server in persistent queue; refill/retry in a moment.",
+                Color3.fromRGB(255, 180, 80)
+            )
+            return false
+        end
+
+        for index, server in ipairs(candidates) do
+            if not runtimeActive() or not env.AutoHop or env.HoldingHighTierFruit then
+                return false
+            end
+
+            local newFruits, retryStats = scanWorkspaceForFruits()
+            fruitDetected = #newFruits > 0
+            if fruitDetected then
+                AddLog("Hop cancelled: fruit appeared during retry cycle.", Color3.fromRGB(0, 255, 100))
+                return false
+            end
+            if retryStats and (tonumber(retryStats.pendingWorldDrops) or 0) > 0 then
+                executorLog("HOP", string.format(
+                    "teleport candidate cancelled: WORLD_DROP became pending/recovering pending=%d wait=%.2fs",
+                    tonumber(retryStats.pendingWorldDrops) or 0,
+                    tonumber(retryStats.pendingConfirmRemaining) or 0
+                ))
+                return false
+            end
+
+            AddLog(
+                string.format("Hop candidate %d/%d", index, #candidates),
+                Color3.fromRGB(120, 200, 255)
+            )
+            local teleported, reason = requestTeleportToServer(server)
+            if teleported then
+                AddLog("Teleport initiated successfully.", Color3.fromRGB(0, 255, 100))
+                return true
+            end
+
+            AddLog(
+                "Server rejected/unavailable: " .. tostring(reason),
+                Color3.fromRGB(255, 160, 80)
+            )
+            if isConnectionClassFailure(reason) then
+                local connectionBackoff = math.max(8, tonumber(env.HopConnectionBackoff) or 10)
+                executorLog("HOP", string.format(
+                    "connection-class teleport failure; stopping candidate chain and backing off %.1fs",
+                    connectionBackoff
+                ))
+                teleportPendingUntil = tick() + connectionBackoff
+                task.wait(connectionBackoff)
+                return false
+            end
+            task.wait(math.max(0.25, tonumber(env.HopRetryDelay) or 2))
+        end
+
+        AddLog("All server candidates failed; refreshing list...", Color3.fromRGB(255, 180, 80))
+        return false
+    end)
+
+    hopping = false
+    if not ok then
+        AddLog("ServerHop error: " .. tostring(result), Color3.fromRGB(255, 100, 100))
+        return false
+    end
+    return result == true
+end
+
+fruitDetected = false
+
+local connectionRecoveryScheduled = false
+local function connectionPromptRecoveryWorker()
+    while runtimeActive() do
+        task.wait(0.50)
+        if not runtimeActive() then break end
+        local promptText = observeTeleportErrorPrompt()
+        if promptText and isConnectionClassFailure(promptText) and not connectionRecoveryScheduled then
+            connectionRecoveryScheduled = true
+            teleportFailureSerial += 1
+            teleportPendingUntil = 0
+            lastTeleportFailure = { result="ConnectionPrompt", message=tostring(promptText) }
+            executorLog("WARN", "connection prompt observed outside failure window: " .. tostring(promptText))
+            task.spawn(function()
+                local delay = math.max(8, tonumber(env.HopConnectionBackoff) or 10)
+                task.wait(delay)
+                connectionRecoveryScheduled = false
+                if runtimeActive() and env.AutoHop and not env.HoldingHighTierFruit
+                    and not hopping and not teleportGuardActive() and type(ServerHop) == "function"
+                then
+                    AddLog("Connection recovered enough to retry native hop.", Color3.fromRGB(255, 200, 0))
+                    ServerHop()
+                end
+            end)
+        end
+    end
+end
+
+local function deepScanWorker()
+    local initialDelay = math.max(0, tonumber(env.DeepScanInitialDelay) or 0.75)
+    local retryDelay = math.max(0.15, tonumber(env.DeepScanRetryDelay) or 0.75)
+    local retries = math.max(1, tonumber(env.DeepScanRetries) or 4)
+    task.wait(initialDelay)
+
+    -- Official Blox Fruits behavior is an hourly natural spawn with a 20-minute
+    -- despawn window. Use current-server time only to shorten obviously cold
+    -- servers; never wait for a future spawn and never skip scanning entirely.
+    local timing = currentServerTiming()
+    if timing then
+        local phase = tonumber(timing.phase) or 0
+        local fruitWindowOpen = phase <= 1250
+        if not fruitWindowOpen then
+            retries = math.min(retries, 3)
+        end
+        executorLog("HOP", string.format(
+            "fruit-window phase=%ds state=%s startupScans=%d",
+            math.floor(phase), fruitWindowOpen and "OPEN" or "COLD", retries
+        ))
+    end
+
+    local started = tick()
+    for attempt = 1, retries do
+        if not runtimeActive() then return end
+        if statusLabel then statusLabel.Text = string.format("FAST SCAN %d/%d", attempt, retries) end
+
+        local fruits, scanStats = scanWorkspaceForFruits()
+        if #fruits > 0 then
+            fruitDetected = true
+            executorLog("PERF", string.format("startup target confirmed attempt=%d elapsed=%.2fs", attempt, tick() - started))
+            AddLog("[PrimeHub] Confirmed WORLD_DROP found during startup scan.", Color3.fromRGB(0, 255, 100))
+            ensureTeamReady("fast deep scan found " .. tostring(#fruits) .. " fruit(s)")
+            return
+        end
+        if attempt < retries then task.wait(retryDelay) end
+    end
+
+    -- Do not slow down genuinely empty servers. Only a server that presented a raw
+    -- WORLD_DROP candidate gets a short confirmation hold.
+    local _, finalStats = scanWorkspaceForFruits()
+    if finalStats and finalStats.pendingWorldDrops > 0 then
+        local holdFor = math.min(
+            math.max(0.25, tonumber(finalStats.pendingConfirmRemaining) or 0)
+                + (tonumber(env.WorldDropRecoveryGrace) or 3.0)
+                + (tonumber(env.WorldDropStartupConfirm) or 4.0)
+                + 0.50,
+            8.0
+        )
+        local holdDeadline = tick() + holdFor
+        executorLog("EVENT", string.format(
+            "startup WORLD_DROP pending/recovering; holding hop up to %.2fs (confirm=%.2fs recoveryGrace=%.2fs)",
+            holdFor,
+            tonumber(env.WorldDropStartupConfirm) or 4.0,
+            tonumber(env.WorldDropRecoveryGrace) or 3.0
+        ))
+        while runtimeActive() and tick() < holdDeadline do
+            task.wait(math.min(0.35, math.max(0.1, holdDeadline - tick())))
+            local confirmed, pendingStats = scanWorkspaceForFruits()
+            if #confirmed > 0 then
+                fruitDetected = true
+                executorLog("PERF", string.format("startup target confirmed after hold elapsed=%.2fs", tick() - started))
+                AddLog("[PrimeHub] Startup WORLD_DROP survived confirmation; starting sniper.", Color3.fromRGB(0, 255, 100))
+                ensureTeamReady("confirmed startup WORLD_DROP")
+                return
+            end
+            if not pendingStats or pendingStats.pendingWorldDrops == 0 then
+                executorLog("EV

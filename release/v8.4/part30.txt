@@ -1,0 +1,11 @@
+env.HopMinFreeSlots,
+        hopPreferredPlayers = env.HopPreferredPlayers,
+        hopMinPlayers = env.HopMinPlayers,
+        hopMaxPlayers = env.HopMaxPlayers,
+        autoHopInterval = env.AutoHopInterval,
+        postFruitHopDelay = env.PostFruitHopDelay,
+        hopVisitedCooldown = env.HopVisitedCooldown,
+        hopQueueTarget = env.HopQueueTarget,
+        hopQueueRefillThreshold = env.HopQueueRefillThreshold,
+        hopQueueMaxPages = env.HopQueueMaxPages,
+        hopQueueMinPlayers = e

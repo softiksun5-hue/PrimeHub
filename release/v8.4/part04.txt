@@ -1,0 +1,386 @@
+mber(env.HopNativeBrowserWaveSize) or 20
+        local pageIndex = 1
+        while pageIndex <= #pageOrder do
+            local results, pending = {}, 0
+            local lastIndex = math.min(#pageOrder, pageIndex + waveSize - 1)
+            for pos=pageIndex,lastIndex do
+                local page = pageOrder[pos]
+                pending += 1
+                task.spawn(function()
+                    local ok, response = pcall(function() return browser:InvokeServer(page) end)
+                    results[#results + 1] = {page=page, ok=ok, response=response}
+                    pending -= 1
+                end)
+            end
+
+            local deadline = os.clock() + (tonumber(env.HopNativeBrowserBatchTimeout) or 1.35)
+            while pending > 0 and os.clock() < deadline do task.wait(0.02) end
+
+            for _, item in ipairs(results) do
+                nativePages += 1
+                if item.ok and type(item.response) == "table" then
+                    local pageHadRows = false
+                    for jobId, info in pairs(item.response) do
+                        if type(info) == "table" then
+                            local count = tonumber(info.Count or info.count or info.Playing or info.playing)
+                            if count then
+                                pageHadRows = true
+                                nativeRows += 1
+                                local maxPlayers = tonumber(info.MaxPlayers or info.maxPlayers) or tonumber(Players.MaxPlayers) or 12
+                                if count >= (tonumber(env.HopQueueMinPlayers) or 5)
+                                    and count <= (tonumber(env.HopQueueMaxPlayers) or 8)
+                                then
+                                    rememberTarget({
+                                        id=tostring(jobId), playing=count, maxPlayers=maxPlayers,
+                                        _primeHubObservedAt=nowUnix,
+                                    })
+                                end
+                            end
+                        end
+                    end
+                    if pageHadRows then state.nativeBrowserGoodPage = tonumber(item.page) end
+                else
+                    nativeErrors += 1
+                end
+            end
+            if pending > 0 then nativeErrors += pending end
+            pageIndex = lastIndex + 1
+
+            if #queue >= queueTarget then break end
+            if #queue >= math.max(maxCandidates * 2, refillThreshold) and pageIndex > waveSize then break end
+        end
+        if #queue > 1 then sortHopCandidates(queue) end
+    end
+
+    -- R4: public HTTP discovery is deliberately disabled.
+    -- Native __ServerBrowser is the only source of candidate JobIds.
+
+    -- If all fresh 5-8 servers are in visit cooldown, relax only the visit age. This keeps
+    -- hopping continuous without ever dropping to 1-2 player destinations.
+    if #queue == 0 and #targetRowsAll > 0 then
+        seen = {}
+        for _,raw in ipairs(targetRowsAll) do
+            if addServer(raw, 600) and #queue >= queueTarget then break end
+        end
+        if #queue == 0 then
+            seen = {}
+            for _,raw in ipairs(targetRowsAll) do
+                if addServer(raw, 180) and #queue >= queueTarget then break end
+            end
+        end
+        if #queue > 0 then executorLog("HOP", "5-8 visit cooldown relaxed to keep server-hop continuous") end
+    end
+
+    if #queue > 1 then sortHopCandidates(queue) end
+    while #queue > queueTarget do table.remove(queue) end
+
+    state.serverQueue = queue
+    state.serverQueueBuiltAt = (#queue > 0) and os.time() or state.serverQueueBuiltAt
+    state.serverQueueStrategy = HOP_QUEUE_STRATEGY
+    state.serverQueuePlaceId = currentPlaceId
+    saveRuntimeStateImmediate(state)
+
+    local result = {}
+    for i=1,math.min(maxCandidates,#queue) do result[#result+1] = queue[i] end
+    hopDebug(string.format(
+        "strategy=stable-5to8-native-v84-r4-anti260 queue=%d selected=%d nativePages=%d nativeRows=%d native5to8=%d nativeErrors=%d goodPage=%s cooldown=%ss",
+        #queue, #result, nativePages, nativeRows, nativeTargetRows, nativeErrors,
+        tostring(state.nativeBrowserGoodPage), tostring(env.HopVisitedCooldown)
+    ))
+    return result
+end
+
+local serverCollectBusy = false
+local function collectUnvisitedServers(maxCandidates)
+    local waited = 0
+    while serverCollectBusy and runtimeActive() and waited < 3.0 do
+        task.wait(0.05)
+        waited += 0.05
+    end
+    if not runtimeActive() then return {} end
+
+    -- Serialize all __ServerBrowser page scans. Previously the background warmer
+    -- and ServerHop could launch two native page waves at the same time.
+    while serverCollectBusy and runtimeActive() do task.wait(0.10) end
+    if not runtimeActive() then return {} end
+
+    serverCollectBusy = true
+    local ok, result = pcall(collectUnvisitedServersUnlocked, maxCandidates)
+    serverCollectBusy = false
+    if not ok then
+        executorLog("WARN", "native server-list collection failed: " .. tostring(result))
+        return {}
+    end
+    return type(result) == "table" and result or {}
+end
+
+local function findUnvisitedServer()
+    local candidates = collectUnvisitedServers(1)
+    return candidates[1]
+end
+
+local function getQueueOnTeleport()
+    if type(queue_on_teleport) == "function" then return queue_on_teleport end
+    if type(queueonteleport) == "function" then return queueonteleport end
+    if type(syn) == "table" and type(syn.queue_on_teleport) == "function" then return syn.queue_on_teleport end
+    if type(fluxus) == "table" and type(fluxus.queue_on_teleport) == "function" then return fluxus.queue_on_teleport end
+    return nil
+end
+
+local function quoteLuaLongString(text)
+    text = tostring(text or "")
+    for eqCount = 6, 40 do
+        local eq = string.rep("=", eqCount)
+        local closeToken = "]" .. eq .. "]"
+        if not string.find(text, closeToken, 1, true) then
+            return "[" .. eq .. "[" .. text .. closeToken
+        end
+    end
+    return string.format("%q", text)
+end
+
+local function queueReloadAfterTeleport()
+    local queuedAt = os.time()
+
+    if type(writefile) == "function" then
+        pcall(function()
+            writefile(TELEPORT_RESUME_FILE, HttpService:JSONEncode({
+                pending=true, queuedAt=queuedAt, placeId=game.PlaceId,
+                fromJobId=tostring(game.JobId or ""),
+                sniper=env.AutoFruitSniper == true,
+                hop=env.AutoHop == true,
+                esp=env.FruitESP == true,
+                serverOnly=env.OnlyServerSpawnedFruits == true,
+            }))
+        end)
+    end
+
+    local queueFn = getQueueOnTeleport()
+    if not queueFn then
+        AddLog("queue_on_teleport unavailable; relying on auto-exec + resume file.", Color3.fromRGB(255, 200, 0))
+        return false
+    end
+
+    local selfSource = env.PrimeHubSelfSource
+    if type(selfSource) ~= "string" or #selfSource < 10000 then
+        executorLog("ERROR", "runtime source missing before teleport")
+        return false
+    end
+
+    local teleportPayload = nil
+    if type(writefile) == "function" and type(readfile) == "function" then
+        local cacheOk = pcall(function() writefile(RUNTIME_CACHE_FILE, selfSource) end)
+        if cacheOk then
+            teleportPayload = string.format([==[
+local e=(type(getgenv)=="function" and getgenv()) or _G
+e.PrimeHubTeleportResume=true
+e.PrimeHubResumeAutoFruitSniper=%s
+e.PrimeHubResumeAutoHop=%s
+e.PrimeHubResumeFruitESP=%s
+e.PrimeHubResumeOnlyServerSpawnedFruits=%s
+e.PrimeHubResumeHopQueuedAt=%d
+pcall(function() if not game:IsLoaded() then game.Loaded:Wait() end end)
+local ok,src=pcall(readfile,%q)
+if not ok or type(src)~="string" or #src<10000 then return end
+e.PrimeHubSelfSource=src
+local fn,err=loadstring(src)
+if not fn then warn("[PrimeHub 8.4] queued runtime compile failed: "..tostring(err)); return end
+return fn()
+]==],
+                tostring(env.AutoFruitSniper == true), tostring(env.AutoHop == true),
+                tostring(env.FruitESP == true), tostring(env.OnlyServerSpawnedFruits == true),
+                queuedAt, RUNTIME_CACHE_FILE
+            )
+        end
+    end
+
+    if not teleportPayload then
+        local sourceLiteral = quoteLuaLongString(selfSource)
+        teleportPayload = string.format([==[
+local e=(type(getgenv)=="function" and getgenv()) or _G
+e.PrimeHubTeleportResume=true
+e.PrimeHubResumeAutoFruitSniper=%s
+e.PrimeHubResumeAutoHop=%s
+e.PrimeHubResumeFruitESP=%s
+e.PrimeHubResumeOnlyServerSpawnedFruits=%s
+e.PrimeHubResumeHopQueuedAt=%d
+local src=%s
+e.PrimeHubSelfSource=src
+local fn,err=loadstring(src)
+if not fn then warn("[PrimeHub 8.4] queued runtime compile failed: "..tostring(err)); return end
+return fn()
+]==],
+            tostring(env.AutoFruitSniper == true), tostring(env.AutoHop == true),
+            tostring(env.FruitESP == true), tostring(env.OnlyServerSpawnedFruits == true),
+            queuedAt, sourceLiteral
+        )
+    end
+
+    executorLog("PERF", string.format(
+        "queue payload prepared runtimeBytes=%d payloadBytes=%d", #selfSource, #teleportPayload
+    ))
+    local ok, err = pcall(queueFn, teleportPayload)
+    if not ok then
+        executorLog("ERROR", "queue_on_teleport rejected payload: " .. tostring(err))
+        return false
+    end
+    return true
+end
+
+local function shortJobId()
+    return string.sub(tostring(game.JobId or "--------"), 1, 8)
+end
+
+local function isRecognizedFruitName(name)
+    return type(name) == "string" and FruitMetadata[name] ~= nil
+end
+
+local function looksLikeFruitName(name)
+    if type(name) ~= "string" or name == "" then return false end
+    if isRecognizedFruitName(name) then return true end
+    return string.find(name, "Fruit", 1, true) ~= nil
+end
+
+local function isTargetFruitName(name)
+    -- PrimeHub 7.9: SniperAllFruits means ALL fruit-looking names, not only entries
+    -- recovered in the old FruitMetadata table. The shortlist is still respected
+    -- when SniperAllFruits is explicitly disabled.
+    if env.SniperAllFruits then
+        return looksLikeFruitName(name)
+    end
+    return TargetFruitNames[name] == true
+end
+
+local function isServerWorldFruitModel(instance)
+    if not instance or not instance.Parent or not instance:IsA("Model") then return false end
+
+    local okDesc, inWorkspace = pcall(function()
+        return instance:IsDescendantOf(workspace)
+    end)
+    if not okDesc or not inWorkspace then return false end
+
+    local handle = instance:FindFirstChild("Handle")
+    local handleReady = handle and handle:IsA("BasePart")
+
+    -- PrimeHub 8.0: WORLD_DROP is authoritative even when the model is nested
+    -- below Workspace. We still require a usable Handle before treating it as pickup-ready.
+    local okTag, tagged = pcall(function()
+        return CollectionService:HasTag(instance, "WORLD_DROP")
+    end)
+    if okTag and tagged then
+        return handleReady == true
+    end
+
+    -- Conservative delayed-tag fallback: keep the exact live structure we already proved,
+    -- and only accept it as a direct Workspace child to avoid broad false positives.
+    if instance.Parent ~= workspace then return false end
+    local rawName = tostring(instance.Name or "")
+    local trimmedName = string.match(rawName, "^%s*(.-)%s*$") or rawName
+    if string.lower(trimmedName) ~= "fruit" or not handleReady then return false end
+
+    local visual = instance:FindFirstChild("Fruit")
+    local animator = instance:FindFirstChild("FruitAnimator")
+    return visual ~= nil and visual:IsA("Model") and animator ~= nil
+end
+
+local function getDroppedFruitPart(tool)
+    if not tool or not tool.Parent then return nil end
+
+    if isServerWorldFruitModel(tool) then
+        local handle = tool:FindFirstChild("Handle")
+        if handle and handle:IsA("BasePart") then return handle end
+        return nil
+    end
+
+    if not tool:IsA("Tool") then return nil end
+    local handle = tool:FindFirstChild("Handle")
+    if handle and handle:IsA("BasePart") then return handle end
+    if tool.Name == "Fruit " then
+        local mesh = tool:FindFirstChildWhichIsA("MeshPart")
+        if mesh then return mesh end
+    end
+    return nil
+end
+
+local function scanOriginalName(tool)
+    local ok, value = pcall(function() return tool:GetAttribute("OriginalName") end)
+    if ok and type(value) == "string" and value ~= "" then return value end
+    return nil
+end
+
+local function isPlayerDroppedFruit(tool)
+    if not tool or not tool:IsA("Tool") then return false end
+
+    local okUserId, droppedByUserId = pcall(function()
+        return tool:GetAttribute("DroppedByUserId")
+    end)
+    if okUserId and tonumber(droppedByUserId) and tonumber(droppedByUserId) > 0 then
+        return true
+    end
+
+    local okDroppedBy, droppedBy = pcall(function()
+        return tool:GetAttribute("DroppedBy")
+    end)
+    if okDroppedBy and droppedBy ~= nil then
+        local text = tostring(droppedBy)
+        if text ~= "" and text ~= "0" and text ~= "nil" then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function fruitNameFromTool(tool)
+    if not tool then return nil end
+    if isServerWorldFruitModel(tool) then return "Fruit " end
+    if not tool:IsA("Tool") then return nil end
+    local name = tostring(tool.Name or "")
+    if name == "Fruit " then return name end
+
+    -- PrimeHub 7.9: trust the live Tool display name when it clearly identifies a fruit.
+    -- This lets renamed/new fruits (for example Blade Fruit) work without waiting for
+    -- FruitMetadata to be updated.
+    if looksLikeFruitName(name) then return name end
+
+    local original = scanOriginalName(tool)
+    if original and FruitStorageIdToName[original] then
+        return FruitStorageIdToName[original]
+    end
+
+    -- Unknown storage ids can still provide a useful dynamic identity.
+    -- "Blade-Blade" -> "Blade Fruit". Keep this conservative: both halves must match.
+    if type(original) == "string" and original ~= "" then
+        local left, right = string.match(original, "^(.+)%-(.+)$")
+        if left and right and left == right then
+            return left .. " Fruit"
+        end
+    end
+    return nil
+end
+
+local function isInsidePlayerCharacter(instance)
+    if not instance then return false end
+
+    local characters = workspace:FindFirstChild("Characters")
+    if characters then
+        local ok, inside = pcall(function() return instance:IsDescendantOf(characters) end)
+        if ok and inside then return true end
+    end
+
+    local node = instance.Parent
+    local depth = 0
+    while node and node ~= workspace and depth < 8 do
+        if node:IsA("Model") then
+            local ok, player = pcall(function() return Players:GetPlayerFromCharacter(node) end)
+            if ok and player then return true end
+        end
+        node = node.Parent
+        depth = depth + 1
+    end
+    return false
+end
+
+local function isFruitLikeTool(tool)
+    if not tool then return false end
+    if isServerWorldFruitModel(tool) then return tru

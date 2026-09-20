@@ -1,0 +1,15 @@
+
+    -- and the next line immediately forced the UI back to License.
+    switchPage("License")
+    task.spawn(function()
+        initializeLicense()
+        refreshLicenseUI()
+    end)
+end
+buildPrimeHubUI()
+
+-- Warm the 5-8 native queue in the background while the user is on the UI/startup scan.
+-- AutoHop can then select a candidate immediately instead of waiting for discovery.
+task.spawn(function()
+    task.wait(0.35)
+    pcall(function() collectUnvisitedServers(math.max(12, tonumber(env.HopQu

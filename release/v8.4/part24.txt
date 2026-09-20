@@ -1,0 +1,11 @@
+e" and state.serverQueue or {}
+    local highCount, midCount, lowCount = 0, 0, 0
+    for _, server in ipairs(queue) do
+        local playing = tonumber(server.playing) or 0
+        if playing >= 8 then highCount=highCount+1
+        elseif playing >= 5 then midCount=midCount+1
+        else lowCount=lowCount+1 end
+    end
+    local info = {
+        queued=#queue, highQueued=highCount, midQueued=midCount, lowQueued=lowCount,
+        strategy=tostring(state.serverQueueStrategy or ""), target=env.Hop

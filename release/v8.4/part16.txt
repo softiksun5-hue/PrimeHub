@@ -1,0 +1,4 @@
+, tostring(env.FruitESP), env.OnlyServerSpawnedFruits and "OFF" or "ON"), THEME.muted)
+    hopDebug("PrimeHub 8.0 loaded | PlaceId="..tostring(game.PlaceId).." JobId="..tostring(game.JobId))
+    hopDebug("Sea auto-detected="..tostring(getCurrentSea()).." | PlaceId="..tostring(game.PlaceId))
+    executorLog("SCAN",string.format("scanner mode=%s allFruits=%s dropFilter=%s | strategy=%s serverList=NATIVE_ALLPAGES range=5-8 queue=%d cooldown=%ss",env.OnlyServerSpawnedFruits and "world-drop-fast" or 

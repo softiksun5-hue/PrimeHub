@@ -1,0 +1,4 @@
+State(); queueCountLabel.Text=tostring(#(qstate.serverQueue or {})); queueInfo.Text=string.format("%d servers • %d min cooldown",tonumber(env.HopQueueTarget) or 200,math.floor((tonumber(env.HopVisitedCooldown) or 2400)/60)); teamInfo.Text="Preferred team: "..tostring(env.PreferredTeam)
+    
+    AddLog("[PrimeHub] PrimeHub 8.0 interface loaded.",THEME.purpleHi)
+    AddLog(string.format("Automation: Sniper=%s | AutoHop=%s | ESP=%s | Drops=%s", tostring(env.AutoFruitSniper), tostring(env.AutoHop)

@@ -1,0 +1,16 @@
+eueRefillThreshold) or 12)) end)
+end)
+
+env.PrimeHubServerHop = ServerHop
+env.PrimeHubDebugHop = function()
+    local browser = nil
+    pcall(function() browser = ReplicatedStorage:FindFirstChild("__ServerBrowser") end)
+    local info = {
+        runtimeId = RUNTIME_ID,
+        active = runtimeActive(),
+        autoHop = env.AutoHop,
+        holdingHighTier = env.HoldingHighTierFruit,
+        hopping = hopping,
+        placeId = game.PlaceId,
+        jobId = game.JobId,
+        nativeBrowser = br

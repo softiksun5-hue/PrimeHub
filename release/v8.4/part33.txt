@@ -1,0 +1,10 @@
+Calls,
+        scanPerfFastCalls = scanPerfFastCalls,
+        scanPerfFullCalls = scanPerfFullCalls,
+        scanPerfAverageMs = scanPerfCalls > 0 and (scanPerfTotalMs / scanPerfCalls) or 0,
+        lastHopTransitSeconds = __resumeHopTransitSeconds,
+        teleportFailureSerial = teleportFailureSerial,
+        suppressTeleportErrorPrompt = env.SuppressTeleportErrorPrompt,
+        primeHubVersion = PRIMEHUB_VERSION,
+        licenseActive = licenseState.active,
+        licenseStatus = licenseStat

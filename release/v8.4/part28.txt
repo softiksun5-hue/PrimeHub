@@ -1,0 +1,17 @@
+p = function()
+    if env.PrimeHubRuntimeId == RUNTIME_ID then
+        env.PrimeHubRuntimeId = RUNTIME_ID + 1
+    end
+    cleanupFlight()
+    destroyFruitESP()
+    pcall(function() gui:Destroy() end)
+end
+
+env.PrimeHubSelfCheck = function()
+    return {
+        runtimeActive = runtimeActive(),
+        placeId = game.PlaceId,
+        jobId = tostring(game.JobId or ""),
+        requestAvailable = getRequestFunction() ~= nil,
+        queueOnTeleportAvailable = getQueueOnTeleport() ~= nil,
+        fi

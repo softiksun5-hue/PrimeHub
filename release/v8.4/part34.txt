@@ -1,0 +1,13 @@
+e.status,
+        licenseKeyHint = licenseState.keyHint,
+        licenseExpiresAt = licenseState.licenseExpiresAt,
+    }
+end
+]====================]
+__primeEnv.PrimeHubSelfSource = __primeSource
+print("[PrimeHub 8.4 STABLE 5-8 NATIVE R4 ANTI260] Launcher loaded self-contained runtime bytes=" .. tostring(#__primeSource))
+local __primeFn, __primeErr = loadstring(__primeSource)
+if not __primeFn then
+    error("[PrimeHub 8.4 STABLE] Initial runtime compile failed: " .. tostring(__primeErr))
+end
+retur

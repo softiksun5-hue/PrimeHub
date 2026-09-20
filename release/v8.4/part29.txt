@@ -1,0 +1,12 @@
+lesystemAvailable = type(readfile) == "function" and type(writefile) == "function",
+        commF = CommF_ ~= nil,
+        team = currentTeamName(),
+        preferredTeam = env.PreferredTeam,
+        autoTeam = env.AutoTeam,
+        characterReady = getPlayerRoot() ~= nil,
+        targetFruitsVisible = #scanWorkspaceForFruits(),
+        autoSniper = env.AutoFruitSniper,
+        autoHop = env.AutoHop,
+        fruitESP = env.FruitESP,
+        tweenSpeed = env.TweenSpeed,
+        hopMinFreeSlots = 

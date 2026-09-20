@@ -1,0 +1,15 @@
+ot,
+    }
+    teamDebug(string.format(
+        "STATUS team=%s preferred=%s auto=%s character=%s root=%s",
+        tostring(info.team), tostring(info.preferred), tostring(info.autoTeam), tostring(info.character), tostring(info.root)
+    ))
+    return info
+end
+
+
+env.PrimeHubActivateLicense = activatePrimeHubLicense
+env.PrimeHubRenewLicense = renewPrimeHubLicense
+env.PrimeHubDeactivateLicense = deactivatePrimeHubLicense
+env.PrimeHubLicenseStatus = function() return licenseState end
+env.PrimeHubSto

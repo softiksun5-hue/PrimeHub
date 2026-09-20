@@ -1,0 +1,295 @@
+-- PrimeHub 8.4 STABLE 5-8 NATIVE R4 ANTI260 FIXPICKUPCOUNT | SELF-CONTAINED LAUNCHER
+-- PrimeHub 8.4 STABLE 5-8 NATIVE R4 ANTI260 FIXPICKUPCOUNT. Native browser serverhop + pickup-count/store.
+-- DEV prespawn/postspawn/IRS/ExpectedHold/ExpectedZero/bunker experiments are intentionally absent.
+local __primeEnv = (type(getgenv) == "function" and getgenv()) or _G
+local __primeSource = [====================[
+-- PrimeHub 8.4 STABLE 5-8 NATIVE R4 ANTI260 FIXPICKUPCOUNT | Fruit Sniper
+-- Stable production fruit-sniper core, fully rebranded and wrapped with Prime licensing/UI.
+-- were destroyed by obfuscation; this version focuses on preserving recovered behavior
+-- while fixing runtime issues that made the readable reconstruction non-functional.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local CollectionService = game:GetService("CollectionService")
+
+local LocalPlayer = Players.LocalPlayer
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 15)
+assert(Remotes, "[PRIMEHUB] ReplicatedStorage.Remotes was not found")
+local CommF_ = Remotes:WaitForChild("CommF_", 15)
+assert(CommF_, "[PRIMEHUB] Remotes.CommF_ was not found")
+
+local env = (type(getgenv) == "function" and getgenv()) or _G
+local PRIMEHUB_BOOT_TICK = tick()
+
+-- PrimeHub 8.0 singleton guard.
+-- Prevents duplicate queued/manual bootstraps in the same Roblox server
+-- from starting a second runtime and resetting automation state.
+local __primeHubJobKey = tostring(game.PlaceId or "") .. ":" .. tostring(game.JobId or "")
+local __primeHubGuardKey = "PrimeHub-8.4-STABLE-6TO9-R2:" .. __primeHubJobKey
+if env.PrimeHubActiveBootstrapKey == __primeHubGuardKey then
+    print("[PrimeHub 8.4 STABLE] Duplicate runtime ignored for JobId=" .. tostring(game.JobId))
+    return
+end
+env.PrimeHubActiveBootstrapKey = __primeHubGuardKey
+-- PrimeHub 8.0 is self-contained: the outer launcher injects the exact runtime source into getgenv().
+-- queue_on_teleport carries that source to the next server; readfile/isfile are not required.
+local PRIMEHUB_VERSION = "8.4-STABLE-5TO8-NATIVE-R4-ANTI260-FIXPICKUPCOUNT"
+local PRIMEHUB_LICENSE_VERSION = "5.0" -- compatibility with the currently registered license build
+local PRIMEHUB_PRODUCT_ID = "primehub"
+local PRIMEHUB_BUILD_ID = "primehub-5.0"
+local PRIMEHUB_LICENSE_SERVER = tostring(env.PrimeHubLicenseServer or "https://prime-license.softik-prime.workers.dev"):gsub("/+$", "")
+local PRIMEHUB_LICENSE_FILE = "PrimeHub_License.json"
+
+env.PrimeHubLicenseValid = false
+env.PrimeHubLicenseRequired = true
+env.PrimeHubRuntimeId = (tonumber(env.PrimeHubRuntimeId) or 0) + 1
+local RUNTIME_ID = env.PrimeHubRuntimeId
+
+local function runtimeActive()
+    return env.PrimeHubRuntimeId == RUNTIME_ID and (env.PrimeHubLicenseRequired ~= true or env.PrimeHubLicenseValid == true)
+end
+
+local function executorLog(level, message)
+    if not env.PrimeHubDebug then return end
+    local stamp = os.date("%H:%M:%S")
+    local line = string.format("[PRIMEHUB][%s][%s] %s", stamp, tostring(level or "INFO"), tostring(message))
+    if level == "ERROR" or level == "WARN" then
+        local ok = pcall(function() warn(line) end)
+        if not ok then pcall(function() print(line) end) end
+    else
+        pcall(function() print(line) end)
+    end
+end
+
+local function hopDebug(message)
+    executorLog("HOP", message)
+end
+
+local function teamDebug(message)
+    executorLog("TEAM", message)
+end
+
+local VISITED_SERVERS_FILE = "PrimeHub_State.json"
+local TELEPORT_RESUME_FILE = "PrimeHub_TeleportResume.json"
+local RUNTIME_CACHE_FILE = "PrimeHub_Runtime_STABLE.lua"
+
+-- Lightweight current-server timing only; no prespawn/postspawn targeting.
+local function currentServerTiming()
+    local startedAt, sourceName = nil, nil
+    pcall(function()
+        local origin = workspace:FindFirstChild("_WorldOrigin")
+        local locations = origin and origin:FindFirstChild("Locations")
+        if locations then
+            for _, obj in ipairs(locations:GetChildren()) do
+                local value = obj:GetAttribute("TimeIn")
+                if type(value) == "number" and value > 0 then
+                    startedAt, sourceName = value, tostring(obj.Name)
+                    break
+                end
+            end
+        end
+    end)
+    if not startedAt then return nil end
+    local okNow, serverNow = pcall(function() return workspace:GetServerTimeNow() end)
+    if not okNow or type(serverNow) ~= "number" then return nil end
+    local age = math.max(0, serverNow - startedAt)
+    return {
+        startedAt=startedAt, age=age, phase=age % 3600,
+        untilHourly=(3600 - (age % 3600)) % 3600,
+        source=sourceName or "TimeIn",
+    }
+end
+env.PrimeHubServerTiming = currentServerTiming
+
+-- Short-lived fallback state for executors that occasionally lose queue_on_teleport.
+if env.PrimeHubTeleportResume ~= true
+    and type(isfile) == "function"
+    and type(readfile) == "function"
+    and isfile(TELEPORT_RESUME_FILE)
+then
+    pcall(function()
+        local saved = HttpService:JSONDecode(readfile(TELEPORT_RESUME_FILE))
+        local age = os.time() - (tonumber(saved and saved.queuedAt) or 0)
+        if type(saved) == "table"
+            and saved.pending == true
+            and age >= 0 and age <= 180
+            and tonumber(saved.placeId) == tonumber(game.PlaceId)
+        then
+            env.PrimeHubTeleportResume = true
+            env.PrimeHubResumeAutoFruitSniper = saved.sniper == true
+            env.PrimeHubResumeAutoHop = saved.hop == true
+            env.PrimeHubResumeFruitESP = saved.esp == true
+            env.PrimeHubResumeOnlyServerSpawnedFruits = saved.serverOnly ~= false
+            env.PrimeHubResumeHopQueuedAt = tonumber(saved.queuedAt) or os.time()
+            print("[PrimeHub 8.4 STABLE] Restored automation state from teleport resume file.")
+        end
+    end)
+end
+
+-- PrimeHub 7.9 automation safety: a fresh/manual launch always starts with automation OFF.
+-- During an actual PrimeHub server hop, queue_on_teleport explicitly carries the
+-- user's current toggle state so enabled automation can continue on the next server.
+local __resumeAutomation = env.PrimeHubTeleportResume == true
+local __resumeAutoFruitSniper = env.PrimeHubResumeAutoFruitSniper == true
+local __resumeAutoHop = env.PrimeHubResumeAutoHop == true
+local __resumeFruitESP = env.PrimeHubResumeFruitESP == true
+local __resumeOnlyServerSpawnedFruits = env.PrimeHubResumeOnlyServerSpawnedFruits == true
+local __resumeHopQueuedAt = tonumber(env.PrimeHubResumeHopQueuedAt) or 0
+env.PrimeHubTeleportResume = nil
+env.PrimeHubResumeAutoFruitSniper = nil
+env.PrimeHubResumeAutoHop = nil
+env.PrimeHubResumeFruitESP = nil
+env.PrimeHubResumeOnlyServerSpawnedFruits = nil
+env.PrimeHubResumeHopQueuedAt = nil
+
+local __resumeHopTransitSeconds = (__resumeAutomation and __resumeHopQueuedAt > 0)
+    and math.max(0, os.time() - __resumeHopQueuedAt) or nil
+
+if __resumeAutomation and type(writefile) == "function" then
+    pcall(function()
+        writefile(TELEPORT_RESUME_FILE, HttpService:JSONEncode({
+            pending=false, consumedAt=os.time(), placeId=game.PlaceId,
+        }))
+    end)
+end
+
+env.AutoFruitSniper = __resumeAutomation and __resumeAutoFruitSniper or false
+env.AutoHop = __resumeAutomation and __resumeAutoHop or false
+env.FruitESP = __resumeAutomation and __resumeFruitESP or false
+env.OnlyServerSpawnedFruits = __resumeAutomation and __resumeOnlyServerSpawnedFruits or true
+env.TweenSpeed = 230
+env.FlyOffset = 5
+-- PrimeHub 8.0: ~3s startup observation window instead of ~9s.
+env.JoinSettleDelay = math.max(0.65, math.min(1.75, tonumber(env.JoinSettleDelay) or 1.00))
+env.DeepScanInitialDelay = env.JoinSettleDelay
+env.DeepScanRetries = 6
+env.DeepScanRetryDelay = 0.40
+env.WorldDropListenerDelay = env.JoinSettleDelay
+env.ScanInterval = math.max(0.5, tonumber(env.ScanInterval) or 1.5)
+-- R9: objects already tagged WORLD_DROP when we join can be stale replication shells.
+-- Confirm their Handle continuously before spending time on team selection / flight.
+env.WorldDropStartupConfirm = 0
+env.WorldDropRuntimeConfirm = 0
+env.WorldDropStartupWindow = math.max(2.0, tonumber(env.WorldDropStartupWindow) or 6.0)
+-- R9 experiment: if a startup WORLD_DROP loses Handle/Fruit/FruitAnimator,
+-- keep the server briefly and watch whether the structure comes back.
+env.WorldDropRecoveryGrace = 0
+env.StoreRetries = 3
+env.StoreReacquireTimeout = tonumber(env.StoreReacquireTimeout) or 4
+env.StorePostPickupDelay = tonumber(env.StorePostPickupDelay) or 0.35
+env.LocalTestMode = false
+
+-- PrimeHub 7.9 server-hop tuning. Mixed discovery samples both ends of the
+-- Roblox public-server list, then interleaves populated and medium servers.
+env.HopMinFreeSlots = math.max(2, tonumber(env.HopMinFreeSlots) or 2)
+env.HopAttemptLimit = math.max(3, math.min(6, tonumber(env.HopAttemptLimit) or 5))
+env.HopRetryDelay = math.max(0.75, tonumber(env.HopRetryDelay) or 1.25)
+env.HopFailureWindow = math.max(2, math.min(5, tonumber(env.HopFailureWindow) or 2.75))
+env.InitialHopAfterScan = env.InitialHopAfterScan ~= false
+env.SuppressTeleportErrorPrompt = false
+env.PrimeHubDebug = env.PrimeHubDebug ~= false
+env.HopPreferNativeBrowser = env.HopPreferNativeBrowser ~= false
+
+env.AutoHopInterval = tonumber(env.AutoHopInterval) or 5
+env.PostFruitHopDelay = tonumber(env.PostFruitHopDelay) or 3
+-- 8.1 TEST R2: normal revisit cooldown is 25 minutes, never permanent.
+env.HopVisitedCooldown = tonumber(env.HopVisitedCooldown) or 1500
+if env.HopVisitedCooldown == 2400 or env.HopVisitedCooldown == 3600 then
+    env.HopVisitedCooldown = 1500
+end
+-- Exact ceiling too: no previously visited server may remain blocked longer than 25 minutes.
+env.HopMaxBlockCooldown = 1500
+env.HopNoCandidateDelay = tonumber(env.HopNoCandidateDelay) or 5
+-- FAST 5-8 discovery: use Blox Fruits' random-access __ServerBrowser only.
+-- Public Roblox server-list discovery is intentionally disabled in R4; native pages are faster
+-- and do not exhaust into the endless empty-candidate loop seen in PUBLIC R3.
+if tonumber(env.HopQueueTarget) == 50 or tonumber(env.HopQueueTarget) == 90 or tonumber(env.HopQueueTarget) == 240 then
+    env.HopQueueTarget = 72
+end
+env.HopQueueTarget = math.max(36, math.min(100, tonumber(env.HopQueueTarget) or 72))
+env.HopQueueRefillThreshold = math.max(8, math.min(20, tonumber(env.HopQueueRefillThreshold) or 12))
+env.HopQueueMaxPages = 4 -- public API is emergency fallback only
+env.HopQueueFreshTtl = math.max(20, math.min(45, tonumber(env.HopQueueFreshTtl) or 30))
+env.HopNativeBrowserEnabled = true
+env.HopNativeBrowserProbePages = math.max(12, math.min(24, tonumber(env.HopNativeBrowserProbePages) or 18))
+env.HopNativeBrowserBatch = math.max(4, math.min(8, tonumber(env.HopNativeBrowserBatch) or 6))
+env.HopNativeBrowserBatchTimeout = math.max(0.8, math.min(2.5, tonumber(env.HopNativeBrowserBatchTimeout) or 1.35))
+env.HopNativeBrowserWaveSize = math.max(6, math.min(12, tonumber(env.HopNativeBrowserWaveSize) or 8))
+env.HopCandidateMaxAge = math.max(30, math.min(90, tonumber(env.HopCandidateMaxAge) or 60))
+env.HopTeleportGuardSeconds = math.max(20, math.min(40, tonumber(env.HopTeleportGuardSeconds) or 30))
+env.HopFailureBackoffMax = math.max(3, math.min(12, tonumber(env.HopFailureBackoffMax) or 6))
+env.HopConnectionBackoff = math.max(8, math.min(20, tonumber(env.HopConnectionBackoff) or 10))
+
+-- 8.1 TEST R2: distance-based flight timeout with a progress watchdog.
+-- Far legitimate fruits are allowed enough time; genuinely stuck movement exits early.
+env.FlightTimeoutMultiplier = math.max(1.05, tonumber(env.FlightTimeoutMultiplier) or 1.35)
+env.FlightTimeoutBuffer = math.max(10, tonumber(env.FlightTimeoutBuffer) or 20)
+env.FlightNoProgressTimeout = math.max(8, tonumber(env.FlightNoProgressTimeout) or 15)
+env.FlightProgressEpsilon = math.max(25, tonumber(env.FlightProgressEpsilon) or 75)
+
+-- STABLE 5-8: prefer the low end of the band to reduce competition for world fruits.
+env.HopQueueMinPlayers = 5
+env.HopQueueMaxPlayers = 8
+env.HopPreferredMinPlayers = 5
+env.HopPreferredMaxPlayers = 8
+env.HopPreferredPlayers = 5
+env.HopMinPlayers = env.HopQueueMinPlayers
+env.HopMaxPlayers = env.HopQueueMaxPlayers
+
+-- Conservative autoreg-farm detector. It never skips a fruit that is already visible;
+-- it only gives an obviously bot-heavy JobId a longer revisit cooldown after scanning.
+env.BotServerScreening = env.BotServerScreening ~= false
+-- Bot-heavy servers are still detected/logged, but revisit expiry remains the same 25 minutes.
+env.BotServerCooldown = tonumber(env.HopVisitedCooldown) or 1500
+
+-- PrimeHub 7.9 scanner origin filter. By default Player-dropped fruits is OFF, so only
+-- tagged/current server WORLD_DROP models become targets. The UI can opt player drops back in.
+env.ScanDescendants = env.ScanDescendants ~= false
+env.ScanDebug = env.ScanDebug == true
+env.ScanDebugNamesLimit = math.max(1, tonumber(env.ScanDebugNamesLimit) or 12)
+if env.OnlyServerSpawnedFruits == nil then env.OnlyServerSpawnedFruits = false end
+if env.SniperAllFruits == nil then env.SniperAllFruits = true end
+
+-- Automatically join a team only when a target fruit is present.
+env.AutoTeam = env.AutoTeam ~= false
+env.PreferredTeam = (env.PreferredTeam == "Marines" and "Marines") or "Pirates"
+env.TeamReadyTimeout = tonumber(env.TeamReadyTimeout) or 10
+env.TeamRetryDelay = tonumber(env.TeamRetryDelay) or 0.75
+
+local TargetFruits = {
+    dough = "Dough Fruit",
+    quake = "Quake Fruit",
+    rumble = "Rumble Fruit",
+    drag = "Dragon Fruit",
+    light = "Light Fruit",
+    ice = "Ice Fruit",
+    magu = "Magma Fruit",
+    dark = "Dark Fruit",
+    kits = "Kitsune Fruit",
+    port = "Portal Fruit",
+    budd = "Buddha Fruit",
+    leop = "Leopard Fruit",
+}
+
+local TargetFruitNames = {}
+for _, fruitName in pairs(TargetFruits) do
+    TargetFruitNames[fruitName] = true
+end
+
+local FruitMetadata = {
+    ["Barrier Fruit"] = {id="Barrier-Barrier", rarity="Rare", color=3447003},
+    ["Blizzard Fruit"] = {id="Blizzard-Blizzard", rarity="Legendary", color=16711935},
+    ["Bomb Fruit"] = {id="Bomb-Bomb", rarity="Common", color=8421504},
+    ["Buddha Fruit"] = {id="Buddha-Buddha", rarity="Legendary", color=16711935},
+    ["Chop Fruit"] = {id="Chop-Chop", rarity="Common", color=8421504},
+    ["Control Fruit"] = {id="Control-Control", rarity="Mythical", color=16711680},
+    ["Dark Fruit"] = {id="Dark-Dark", rarity="Uncommon", color=3447003},
+    ["Diamond Fruit"] = {id="Diamond-Diamond", rarity="Rare", color=3447003},
+    ["Dough Fruit"] = {id="Dough-Dough", rarity="Mythical", color=16711680},
+    ["Dragon Fruit"] = {id="Dragon-Dragon", rarity="Mythical", color=16711680},
+    ["Falcon Fruit"] = {id="Falcon-Falcon", rarity="Uncommon", color=3447003},
+    ["Flame Fruit"] = {id="Flame-Flame", rari

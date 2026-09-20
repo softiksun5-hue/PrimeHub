@@ -1,0 +1,8 @@
+QueueTarget,
+        builtAt=tonumber(state.serverQueueBuiltAt) or 0, minPlayers=env.HopQueueMinPlayers,
+        maxPlayers=env.HopQueueMaxPlayers, cooldown=env.HopVisitedCooldown,
+        botServerCooldown=env.BotServerCooldown, botServerScreening=env.BotServerScreening,
+    }
+    hopDebug(string.format(
+        "QUEUE STATUS strategy=%s queued=%d high=%d mid=%d low=%d target=%d eligibleBand=%d-%d cooldown=%ss botCooldown=%ss builtAt=%s",
+        info.strategy, info.queued, info.highQueued, inf
