@@ -1,4 +1,4 @@
--- PrimeHub 8.5 STABLE PUBLIC FIX2 protected assembler
+-- PrimeHub 8.5 STABLE PUBLIC FIX4 BG-RESILIENT protected assembler
 -- Encoded split release with integrity checks.
 local BASE = "https://raw.githubusercontent.com/softiksun5-hue/PrimeHub/main/release/v8.5/"
 local FILES = {"part01.txt","part02.txt"}
@@ -43,17 +43,17 @@ for i, name in ipairs(FILES) do
         ok, body = pcall(function() return game:HttpGet(url) end)
     end
     if not ok or type(body) ~= "string" or #body == 0 then
-        error("[PrimeHub 8.5 FIX2] Could not download release chunk " .. name .. ": " .. tostring(body))
+        error("[PrimeHub 8.5 FIX4] Could not download release chunk " .. name .. ": " .. tostring(body))
     end
     local decoded = decodeBase64(body)
     if type(decoded) ~= "string" or #decoded == 0 then
-        error("[PrimeHub 8.5 FIX2] Could not decode release chunk " .. name)
+        error("[PrimeHub 8.5 FIX4] Could not decode release chunk " .. name)
     end
     parts[i] = decoded
 end
 local source = table.concat(parts)
-if #source ~= 212349 then
-    error("[PrimeHub 8.5 FIX2] Release assembly size mismatch: " .. tostring(#source) .. " != 212349")
+if #source ~= 218987 then
+    error("[PrimeHub 8.5 FIX4] Release assembly size mismatch: " .. tostring(#source) .. " != 218987")
 end
 local MOD = 65521
 local a, s = 1, 0
@@ -62,14 +62,14 @@ for i = 1, #source do
     s = (s + a) % MOD
 end
 local checksum = s * 65536 + a
-if checksum ~= 3167213106 then
-    error("[PrimeHub 8.5 FIX2] Release checksum mismatch: " .. tostring(checksum))
+if checksum ~= 231394168 then
+    error("[PrimeHub 8.5 FIX4] Release checksum mismatch: " .. tostring(checksum))
 end
-if not string.find(source, "8.5-STABLE-PUBLIC-FIX2", 1, true) then
-    error("[PrimeHub 8.5 FIX2] Release identity marker missing")
+if not string.find(source, "8.5-STABLE-PUBLIC-FIX4-BG-RESILIENT", 1, true) then
+    error("[PrimeHub 8.5 FIX4] Release identity marker missing")
 end
 local env = (type(getgenv) == "function" and getgenv()) or _G
 env.PrimeHubPublicPayloadSource = source
 local fn, err = loadstring(source)
-if not fn then error("[PrimeHub 8.5 FIX2] Release compile failed: " .. tostring(err)) end
+if not fn then error("[PrimeHub 8.5 FIX4] Release compile failed: " .. tostring(err)) end
 return fn()

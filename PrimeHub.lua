@@ -7,8 +7,8 @@ if (not ok) or type(body) ~= "string" or #body < 100 then
     ok, body = pcall(function() return game:HttpGet(URL) end)
 end
 if not ok or type(body) ~= "string" or #body < 100 then
-    error("[PrimeHub 8.5 FIX2] Could not download fresh release: " .. tostring(body))
+    error("[PrimeHub 8.5 FIX4] Could not download fresh release: " .. tostring(body))
 end
 local fn, err = loadstring(body)
-if not fn then error("[PrimeHub 8.5 FIX2] Release loader compile failed: " .. tostring(err)) end
+if not fn then error("[PrimeHub 8.5 FIX4] Release loader compile failed: " .. tostring(err)) end
 return fn()
